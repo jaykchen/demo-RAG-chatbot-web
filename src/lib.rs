@@ -1,8 +1,11 @@
 use webhook_flows::{create_endpoint, request_handler, send_response};
 use openai_flows::{
     embeddings::{EmbeddingsInput},
-    chat::{ChatModel, ChatOptions, ChatRole, chat_history},
     OpenAIFlows,
+};
+use llmservice_flows::{
+    chat::{ChatOptions, ChatRole, chat_history},
+    LLMServiceFlows,
 };
 use store_flows::{get, set};
 use vector_store_flows::*;
@@ -38,6 +41,7 @@ pub async fn on_deploy() {
 #[request_handler]
 async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, body: Vec<u8>) {
     logger::init();
+    let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
     let cs = &ContentSettings {
         title: std::env::var("title").unwrap_or("".to_string()),
         author: std::env::var("author").unwrap_or("".to_string()),
@@ -108,6 +112,7 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
 
     let mut openai = OpenAIFlows::new();
     openai.set_retry_times(3);
+    let mut llm = LLMServiceFlows::new(&llm_endpoint);
                 
     let restart = match get(&chat_id.to_string()) {
         Some(v) => v.as_bool().unwrap_or_default(),
@@ -185,14 +190,14 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
 
     let co = ChatOptions {
         // model: ChatModel::GPT4,
-        model: ChatModel::GPT35Turbo16K,
         restart: restart,
         system_prompt: Some(&system_prompt_updated),
         post_prompt: Some(&cs.post_prompt),
+        token_limit: 2048,
         ..Default::default()
     };
 
-    match openai.chat_completion(&chat_id.to_string(), &text, &co).await {
+    match llm.chat_completion(&chat_id.to_string(), &text, &co).await {
         Ok(r) => {
             reply(&r.choice);
         }
