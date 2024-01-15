@@ -121,7 +121,7 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
 
     let mut question_history = String::new();
     if !restart {
-        match chat_history(&chat_id.to_string(), 1) {
+        match chat_history(&chat_id.to_string(), 8) {
             Some(v) => {
                 for m in v.into_iter() {
                     if let ChatRole::User = m.role {
