@@ -16,7 +16,7 @@ use serde_json::json;
 use serde_json::Value;
 use regex::Regex;
 
-static SOFT_CHAR_LIMIT : usize = 30000;
+static SOFT_CHAR_LIMIT : usize = 512;
 
 #[derive(Debug)]
 struct ContentSettings {
