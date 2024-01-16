@@ -56,7 +56,6 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
 
     let body_string = String::from_utf8(body).unwrap_or("".to_string());
     let mut text = body_string.as_str();
-    let mut random_q = String::new();
     if text.eq_ignore_ascii_case("/new") {
         set(&chat_id.to_string(), json!(true), None);
         log::info!("Restarted converstion for {}", chat_id);
