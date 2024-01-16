@@ -19,7 +19,7 @@ Click on "Advanced" when you import the GitHub repo to flows.network to enter th
 | no_answer_mesg | Sorry, I cannot answer questions that are not related to the subject. |
 | RUST_LOG | debug  |
 
-After a successful deployment, you will receive a webhook URL in the Webhook Endpoint section. Copy and paste this URL after 'https://flows-chat-ui.vercel.app/?chat_url=' in your browser's address bar. This will allow you to start a chat with your RAG chatbot.
+After a successful deployment, you will receive a webhook URL in the Webhook Endpoint section. Copy and paste this URL after `https://flows-chat-ui.vercel.app/?chat_url=` in your browser's address bar. This will allow you to start a chat with your RAG chatbot.
 
 ```
 https://flows-chat-ui.vercel.app/?chat_url=https://code.flows.network/webhook/a-z
