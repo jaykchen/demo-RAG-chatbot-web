@@ -10,7 +10,6 @@ use llmservice_flows::{
 use store_flows::{get, set};
 use vector_store_flows::*;
 use flowsnet_platform_sdk::logger;
-use rand::seq::SliceRandom;
 use std::collections::HashMap;
 use serde_json::json;
 use serde_json::Value;
@@ -20,15 +19,10 @@ static SOFT_CHAR_LIMIT : usize = 512;
 
 #[derive(Debug)]
 struct ContentSettings {
-    title: String,
-    author: String,
-    publisher: String,
-    link: String,
     system_prompt: String,
     post_prompt: String,
     error_mesg: String,
     no_answer_mesg: String,
-    random_mesg: String,
     collection_name: String,
 }
 
@@ -43,20 +37,13 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
     logger::init();
     let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
     let cs = &ContentSettings {
-        title: std::env::var("title").unwrap_or("".to_string()),
-        author: std::env::var("author").unwrap_or("".to_string()),
-        publisher: std::env::var("publisher").unwrap_or("".to_string()),
-        link: std::env::var("link").unwrap_or("".to_string()),
         system_prompt: std::env::var("system_prompt").unwrap_or("".to_string()),
         post_prompt: std::env::var("post_prompt").unwrap_or("".to_string()),
         error_mesg: std::env::var("error_mesg").unwrap_or("".to_string()),
         no_answer_mesg: std::env::var("no_answer_mesg").unwrap_or("No answer".to_string()),
-        random_mesg: std::env::var("random_mesg").unwrap_or("".to_string()),
         collection_name: std::env::var("collection_name").unwrap_or("".to_string()),
     };
     log::info!("The system prompt is {} lines", cs.system_prompt.lines().count());
-
-    let help = format!("Ask any question about the '{}' book, by {} from {}. Get the book: {}", cs.title, cs.author, cs.publisher, cs.link);
 
     log::info!("Headers -- {:?}", headers);
     let mut chat_id = "".to_string();
@@ -70,44 +57,10 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
     let body_string = String::from_utf8(body).unwrap_or("".to_string());
     let mut text = body_string.as_str();
     let mut random_q = String::new();
-    if text.eq_ignore_ascii_case("/help") {
-        reply(&help);
-        return;
-
-    } else if text.eq_ignore_ascii_case("") {
-        reply(&help);
-        set(&chat_id, json!(true), None);
-        log::info!("Started converstion for {}", chat_id);
-        return;
-
-    } else if text.eq_ignore_ascii_case("/new") {
-        reply(&help);
+    if text.eq_ignore_ascii_case("/new") {
         set(&chat_id.to_string(), json!(true), None);
         log::info!("Restarted converstion for {}", chat_id);
         return;
-
-    } else if text.eq_ignore_ascii_case("/feeling_lucky") {
-        let mut qs = Vec::<String>::new();
-        let mut current = String::new();
-        for line in cs.random_mesg.lines() {
-            if line.starts_with("------") {
-                qs.push(current.clone());
-                current.clear();
-            } else {
-                current.push_str(line);
-                current.push_str("\n");
-            }
-        }
-        let q = qs.choose(&mut rand::thread_rng()).unwrap();
-
-        reply(q);
-        set(&chat_id.to_string(), json!(true), None);
-        log::info!("Restarted converstion for {}", chat_id);
-        random_q = q.to_string();
-    }
-
-    if !random_q.is_empty() {
-        text = &random_q;
     }
 
     let mut openai = OpenAIFlows::new();
