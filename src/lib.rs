@@ -1,13 +1,7 @@
-use webhook_flows::{create_endpoint, request_handler, send_response};
-use openai_flows::{
-    embeddings::{EmbeddingsInput},
-    OpenAIFlows,
-};
-use llmservice_flows::{
-    chat::{ChatOptions, ChatRole, chat_history},
-    LLMServiceFlows,
-};
-use store_flows::{get, set};
+use webhook_flows::{ create_endpoint, request_handler, send_response };
+use openai_flows::{ embeddings::{ EmbeddingsInput }, OpenAIFlows };
+use llmservice_flows::{ chat::{ ChatOptions, ChatRole, chat_history }, LLMServiceFlows };
+use store_flows::{ get, set };
 use vector_store_flows::*;
 use flowsnet_platform_sdk::logger;
 use std::collections::HashMap;
@@ -15,7 +9,7 @@ use serde_json::json;
 use serde_json::Value;
 use regex::Regex;
 
-static SOFT_CHAR_LIMIT : usize = 512;
+static SOFT_CHAR_LIMIT: usize = 512;
 
 #[derive(Debug)]
 struct ContentSettings {
@@ -36,13 +30,13 @@ pub async fn on_deploy() {
 async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, body: Vec<u8>) {
     logger::init();
     let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
-    let cs = &ContentSettings {
+    let cs = &(ContentSettings {
         system_prompt: std::env::var("system_prompt").unwrap_or("".to_string()),
         post_prompt: std::env::var("post_prompt").unwrap_or("".to_string()),
         error_mesg: std::env::var("error_mesg").unwrap_or("".to_string()),
         no_answer_mesg: std::env::var("no_answer_mesg").unwrap_or("No answer".to_string()),
         collection_name: std::env::var("collection_name").unwrap_or("".to_string()),
-    };
+    });
     log::info!("The system prompt is {} lines", cs.system_prompt.lines().count());
 
     log::info!("Headers -- {:?}", headers);
@@ -65,7 +59,7 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
     let mut openai = OpenAIFlows::new();
     openai.set_retry_times(3);
     let mut llm = LLMServiceFlows::new(&llm_endpoint);
-                
+
     let restart = match get(&chat_id.to_string()) {
         Some(v) => v.as_bool().unwrap_or_default(),
         None => false,
@@ -81,7 +75,7 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
                         question_history.push_str("\n");
                     }
                 }
-            },
+            }
             None => (),
         };
     }
@@ -89,14 +83,19 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
     log::debug!("The question history is {}", question_history);
 
     // Compute embedding for the question
-    let question_vector = match openai.create_embeddings(EmbeddingsInput::String(question_history)).await {
+    let question_vector = match
+        openai.create_embeddings(EmbeddingsInput::String(question_history)).await
+    {
         Ok(r) => {
             if r.len() < 1 {
                 log::error!("OpenAI returned no embedding for the question");
                 reply(&cs.no_answer_mesg);
                 return;
             }
-            r[0].iter().map(|n| *n as f32).collect()
+            r[0]
+                .iter()
+                .map(|n| *n as f32)
+                .collect()
         }
         Err(e) => {
             log::error!("OpenAI returned an error: {}", e);
@@ -114,8 +113,17 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
     match search_points(&cs.collection_name, &p).await {
         Ok(sp) => {
             for p in sp.iter() {
-                if system_prompt_updated.len() > SOFT_CHAR_LIMIT { break; }
-                log::debug!("Received vector score={} and text={}", p.score, first_x_chars(p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap(), 256));
+                if system_prompt_updated.len() > SOFT_CHAR_LIMIT {
+                    break;
+                }
+                log::debug!(
+                    "Received vector score={} and text={}",
+                    p.score,
+                    first_x_chars(
+                        p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap(),
+                        256
+                    )
+                );
                 let p_text = p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap();
                 if p.score > 0.75 && !system_prompt_updated.contains(p_text) {
                     system_prompt_updated.push_str("\n");
@@ -130,15 +138,22 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
         }
     }
     // log::debug!("The prompt is {} chars starting with {}", system_prompt_updated.len(), first_x_chars(&system_prompt_updated, 256));
-    
+
     match system_prompt_updated.eq(&cs.system_prompt) {
-        true =>  {
+        true => {
             log::info!("No relevant context for question");
             reply(&cs.no_answer_mesg);
             return;
-        },
+        }
         _ => (),
     }
+
+    // use LLM's existing knowledge to answer the question, use the answer
+    // that contains more information to retrieve source material that may missed the first search
+    let hypo_answer = create_hypothetical_answer(&text).await;
+
+    // use the additional source material found to enrich the context for answer generation
+    let _ = search_collection(&hypo_answer, &cs.collection_name, &mut system_prompt_updated).await;
 
     let co = ChatOptions {
         // model: ChatModel::GPT4,
@@ -167,19 +182,101 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
     }
 }
 
-fn alpha_numeric (s: &str) -> String {
+fn alpha_numeric(s: &str) -> String {
     let regex_pattern = Regex::new(r"[^a-zA-Z0-9]").unwrap();
     regex_pattern.replace_all(s, "-").to_string()
 }
 
-fn first_x_chars (s: &str, x: usize) -> String {
+fn first_x_chars(s: &str, x: usize) -> String {
     s.chars().take(x).collect()
 }
 
-fn reply (s: &str) {
+fn reply(s: &str) {
     send_response(
         200,
         vec![(String::from("content-type"), String::from("text/html"))],
-        s.as_bytes().to_vec(),
+        s.as_bytes().to_vec()
     );
+}
+
+pub async fn create_hypothetical_answer(question: &str) -> String {
+    let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
+
+    let llm = LLMServiceFlows::new(&llm_endpoint);
+    let sys_prompt_1 = format!(
+        "You're an assistant bot with expertise in all domains of human knowledge."
+    );
+
+    let usr_prompt_1 = format!(
+        "You're preparing to answer questions about a specific source material, before ingesting the source material, you need to answer the question based on the knowledge you're trained on, here it is: `{question}`, please provide a concise answer in one paragraph, stay truthful and factual."
+    );
+    let co = ChatOptions {
+        // model: ChatModel::GPT4,
+        restart: true,
+        system_prompt: Some(&sys_prompt_1),
+        token_limit: 2048,
+        ..Default::default()
+    };
+
+    match llm.chat_completion("create-hypo-answer", &usr_prompt_1, &co).await {
+        Ok(r) => r.choice,
+
+        Err(_e) => "".to_owned(),
+    }
+}
+
+pub async fn search_collection(
+    question: &str,
+    collection_name: &str,
+    system_prompt_updated: &mut String
+) {
+    let mut openai = OpenAIFlows::new();
+    openai.set_retry_times(3);
+
+    let question_vector = match
+        openai.create_embeddings(EmbeddingsInput::String(question.to_string())).await
+    {
+        Ok(r) => {
+            if r.len() < 1 {
+                log::error!("OpenAI returned no embedding for the question");
+                return;
+            }
+            r[0]
+                .iter()
+                .map(|n| *n as f32)
+                .collect()
+        }
+        Err(e) => {
+            log::error!("OpenAI returned an error: {}", e);
+            return;
+        }
+    };
+
+    let p = PointsSearchParams {
+        vector: question_vector,
+        limit: 5,
+    };
+    match search_points(&collection_name, &p).await {
+        Ok(sp) => {
+            for p in sp.iter() {
+                log::debug!(
+                    "Received vector score={} and text={}",
+                    p.score,
+                    first_x_chars(
+                        p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap(),
+                        256
+                    )
+                );
+                let p_text = p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap();
+                if p.score > 0.75 && !system_prompt_updated.contains(p_text) {
+                    system_prompt_updated.push_str("\n");
+                    system_prompt_updated.push_str(p_text);
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Vector search returns error: {}", e);
+            return;
+        }
+    }
 }
