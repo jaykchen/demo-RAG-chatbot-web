@@ -317,13 +317,17 @@ pub async fn chat_history_smart(question_list: Vec<String>, restart: bool) -> Ve
     let sys_prompt_1 = format!("You're an assistant bot with strong logical thinking.");
 
     let usr_prompt_1 = format!(
-        r#"You are an AI bot that assists a simpler bot, which is tasked with answering questions based on given source material. Your primary duty is to review the history of questions asked and determine their relevance to the source material. You must:
-1. Determine whether the most recent question pertains to the source material directly.
-2. If the most recent question is a meta-question (e.g., asking to generate new questions based on the source material), consider it irrelevant to the task of answering questions about the source material itself.
-3. If the most recent question is relevant to the source material, evaluate the preceding questions, filtering out any that are less than 50% likely to be relevant or are meta-questions.
-4. If the most recent question is not about the source material or is a meta-question, remove all preceding questions and retain only the most recent question if it is a direct inquiry about the source material.
-5. Maintain the order of relevant, direct questions about the source material.        
-The list of questions is as follows: 
+        r#"You are an AI bot that assists a simpler bot, which is tasked with answering questions based on given source material. Your primary duty is to review the history of questions asked, retain the most recent question regardless of its content, and determine the relevance of preceding questions to the source material. Follow these steps:
+1. Always retain the most recent question asked, as it is the current priority for response or action.
+2. Evaluate all preceding questions to determine if they are directly relevant to the source material.
+3. Retain any preceding questions that are directly relevant to the source material and likely to provide context or additional information needed to answer the most recent question.
+4. Remove any preceding questions that are meta-questions, unrelated to the source material, or less than 50% likely to be relevant.
+5. Maintain the order of the retained questions, ensuring the most recent question is listed last.
+When analyzing the provided list of questions, produce a JSON object that includes the retained questions, formatted according to RFC8259 standards. The JSON object should be correctly structured, with proper escaping of special characters, and contain no additional content or formatting.
+Here's how to proceed with the list of questions:
+1. Include the most recent question at the end of the JSON object, regardless of its nature.
+2. Include only relevant preceding questions about the source material in the JSON object before the most recent question.
+3. If no preceding questions are relevant, the JSON object should only contain the most recent question.The list of questions is as follows: 
 {question_list_str}
 Reply with a JSON object in the following format:
 {{
