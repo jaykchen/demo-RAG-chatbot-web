@@ -1,12 +1,15 @@
 use flowsnet_platform_sdk::logger;
-use llmservice_flows::{ chat::{ chat_history, ChatOptions, ChatRole }, LLMServiceFlows };
-use openai_flows::{ embeddings::EmbeddingsInput, OpenAIFlows };
+use llmservice_flows::{
+    chat::{chat_history, ChatOptions, ChatRole},
+    LLMServiceFlows,
+};
+use openai_flows::{embeddings::EmbeddingsInput, OpenAIFlows};
 use regex::Regex;
-use serde_json::{ from_str, json, Value };
+use serde_json::{from_str, json, Value};
 use std::collections::HashMap;
-use store_flows::{ get, set, Expire, ExpireKind };
+use store_flows::{get, set, Expire, ExpireKind};
 use vector_store_flows::*;
-use webhook_flows::{ create_endpoint, request_handler, send_response };
+use webhook_flows::{create_endpoint, request_handler, send_response};
 
 static SOFT_CHAR_LIMIT: usize = 512;
 
@@ -36,7 +39,10 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
         no_answer_mesg: std::env::var("no_answer_mesg").unwrap_or("No answer".to_string()),
         collection_name: std::env::var("collection_name").unwrap_or("".to_string()),
     });
-    log::info!("The system prompt is {} lines", cs.system_prompt.lines().count());
+    log::info!(
+        "The system prompt is {} lines",
+        cs.system_prompt.lines().count()
+    );
 
     log::info!("Headers -- {:?}", headers);
     let mut chat_id = "".to_string();
@@ -71,7 +77,11 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
                 let question_list = v
                     .into_iter()
                     .filter_map(|m| {
-                        if let ChatRole::User = m.role { Some(m.content) } else { None }
+                        if let ChatRole::User = m.role {
+                            Some(m.content)
+                        } else {
+                            None
+                        }
                     })
                     .collect::<Vec<String>>();
                 question_history = chat_history_smart(question_list, restart).await.join("\n");
@@ -81,8 +91,9 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
     }
     log::debug!("The question history is {}", question_history);
 
-    let question_vector = match
-        openai.create_embeddings(EmbeddingsInput::String(question_history)).await
+    let question_vector = match openai
+        .create_embeddings(EmbeddingsInput::String(question_history))
+        .await
     {
         Ok(r) => {
             if r.len() < 1 {
@@ -90,10 +101,7 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
                 reply(&cs.no_answer_mesg);
                 return;
             }
-            r[0]
-                .iter()
-                .map(|n| *n as f32)
-                .collect()
+            r[0].iter().map(|n| *n as f32).collect()
         }
         Err(e) => {
             log::error!("OpenAI returned an error: {}", e);
@@ -118,11 +126,24 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
                     "Received vector score={} and text={}",
                     p.score,
                     first_x_chars(
-                        p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap(),
+                        p.payload
+                            .as_ref()
+                            .unwrap()
+                            .get("text")
+                            .unwrap()
+                            .as_str()
+                            .unwrap(),
                         256
                     )
                 );
-                let p_text = p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap();
+                let p_text = p
+                    .payload
+                    .as_ref()
+                    .unwrap()
+                    .get("text")
+                    .unwrap()
+                    .as_str()
+                    .unwrap();
                 if p.score > 0.75 && !system_prompt_updated.contains(p_text) {
                     system_prompt_updated.push_str("\n");
                     system_prompt_updated.push_str(p_text);
@@ -151,7 +172,12 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
     let hypo_answer = create_hypothetical_answer(&text).await;
 
     // use the additional source material found to enrich the context for answer generation
-    let _ = search_collection(&hypo_answer, &cs.collection_name, &mut system_prompt_updated).await;
+    let _ = search_collection(
+        &hypo_answer,
+        &cs.collection_name,
+        &mut system_prompt_updated,
+    )
+    .await;
 
     let co = ChatOptions {
         // model: ChatModel::GPT4,
@@ -193,7 +219,7 @@ fn reply(s: &str) {
     send_response(
         200,
         vec![(String::from("content-type"), String::from("text/html"))],
-        s.as_bytes().to_vec()
+        s.as_bytes().to_vec(),
     );
 }
 
@@ -201,9 +227,8 @@ pub async fn create_hypothetical_answer(question: &str) -> String {
     let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
 
     let llm = LLMServiceFlows::new(&llm_endpoint);
-    let sys_prompt_1 = format!(
-        "You're an assistant bot with expertise in all domains of human knowledge."
-    );
+    let sys_prompt_1 =
+        format!("You're an assistant bot with expertise in all domains of human knowledge.");
 
     let usr_prompt_1 = format!(
         "You're preparing to answer questions about a specific source material, before ingesting the source material, you need to answer the question based on the knowledge you're trained on, here it is: `{question}`, please provide a concise answer in one paragraph, stay truthful and factual."
@@ -216,7 +241,10 @@ pub async fn create_hypothetical_answer(question: &str) -> String {
         ..Default::default()
     };
 
-    match llm.chat_completion("create-hypo-answer", &usr_prompt_1, &co).await {
+    match llm
+        .chat_completion("create-hypo-answer", &usr_prompt_1, &co)
+        .await
+    {
         Ok(r) => r.choice,
 
         Err(_e) => "".to_owned(),
@@ -226,23 +254,21 @@ pub async fn create_hypothetical_answer(question: &str) -> String {
 pub async fn search_collection(
     question: &str,
     collection_name: &str,
-    system_prompt_updated: &mut String
+    system_prompt_updated: &mut String,
 ) {
     let mut openai = OpenAIFlows::new();
     openai.set_retry_times(3);
 
-    let question_vector = match
-        openai.create_embeddings(EmbeddingsInput::String(question.to_string())).await
+    let question_vector = match openai
+        .create_embeddings(EmbeddingsInput::String(question.to_string()))
+        .await
     {
         Ok(r) => {
             if r.len() < 1 {
                 log::error!("OpenAI returned no embedding for the question");
                 return;
             }
-            r[0]
-                .iter()
-                .map(|n| *n as f32)
-                .collect()
+            r[0].iter().map(|n| *n as f32).collect()
         }
         Err(e) => {
             log::error!("OpenAI returned an error: {}", e);
@@ -261,11 +287,24 @@ pub async fn search_collection(
                     "Received vector score={} and text={}",
                     p.score,
                     first_x_chars(
-                        p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap(),
+                        p.payload
+                            .as_ref()
+                            .unwrap()
+                            .get("text")
+                            .unwrap()
+                            .as_str()
+                            .unwrap(),
                         256
                     )
                 );
-                let p_text = p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap();
+                let p_text = p
+                    .payload
+                    .as_ref()
+                    .unwrap()
+                    .get("text")
+                    .unwrap()
+                    .as_str()
+                    .unwrap();
                 if p.score > 0.75 && !system_prompt_updated.contains(p_text) {
                     system_prompt_updated.push_str("\n");
                     system_prompt_updated.push_str(p_text);
@@ -294,31 +333,42 @@ pub async fn chat_history_smart(question_list: Vec<String>, restart: bool) -> Ve
     let sys_prompt_1 = format!("You're an assistant bot with strong logical thinking.");
 
     let usr_prompt_1 = format!(
-        r#"You are reviewing a list of questions. Your task is to determine the relevance of each question to the source material. For each question in the list, provide a brief explanation of whether it is relevant, partially relevant, or irrelevant to the source material. Here is the list of questions: {question_list_str}
+        r#"You are reviewing a list of questions. Your task is to evaluate the relevance of each question to the most recent question. You must determine if each question is 'relevant', 'partially relevant', or 'irrelevant'. This relevance assessment is crucial because, in the next step, we will create a JSON object and questions deemed 'irrelevant' will be removed from the JSON, except for the final question in the list which will be included irrespective of its relevance.
+Please format your response by listing each question followed by its relevance status. Make sure to explicitly identify any 'irrelevant' questions as these will need to be excluded in the JSON object creation process. Also, be sure to clearly indicate which question is the last in the list.
+Here is the list of questions: `{question_list_str}`.
+Provide your analysis of the relevance of each question and remember to clearly mark the last question. Keep in mind that the next step involves removing any questions that are not fully relevant, with the exception of the last question.
 Please respond with your analysis of the relevance of each question."#
     );
 
     let usr_prompt_2 = format!(
-        r#"Using the relevance analysis from Step 1, create a JSON object that includes the questions that have been identified as relevant, plus the most recent question regardless of its relevance. Follow the format specified below and ensure the JSON is properly formatted and ready to be parsed by a JSON parser. Do not add any additional content or formatting outside of what is specified. Here is the format you must use:        
+        r#"Based on the relevance analysis from Step 1, you are tasked with creating a JSON object that includes only the questions identified as 'relevant'. The only exception is the last question in the list, which should be included in the JSON object under the key "question_last" regardless of its relevance. 
+Please ensure that you:  
+- Include only 'relevant' questions in the JSON object, under sequential keys starting with "question_1".
+- Do not include 'irrelevant' or 'partially relevant' questions, except for the last question.
+- Clearly mark the last question with the key "question_last", even if it was not deemed 'relevant'.
+- Use the exact text from the questions as they appear in the list.
+- Make sure the JSON structure is valid, with all keys and string values enclosed in double quotes.
+The JSON object should be formatted as follows:   
 {{
-\"question_1\": \"first retained question\",
+\"question_1\": \"actual_text_of_first_relevant_question\",
+\"question_2\": \"actual_text_of_second_relevant_question\",
 ...
-\"question_n\": \"most recent question, regardless of relevance\"
-...
+\"question_last\": \"actual_text_of_the_last_question_from_the_list regardless of its relevance\"
 }}
-Ensure the JSON is properly formatted and ready to be parsed by a JSON parser. Do not add any additional content or formatting outside of what is specified."#
+Confirm that the irrelevant questions have been omitted, and provide the correctly formatted JSON object now based on these refined instructions.
+"#
     );
 
-    match
-        chain_of_chat(
-            &sys_prompt_1,
-            &usr_prompt_1,
-            "chained-questions-filter",
-            2048,
-            &usr_prompt_2,
-            1024,
-            "question-filter-failed"
-        ).await
+    match chain_of_chat(
+        &sys_prompt_1,
+        &usr_prompt_1,
+        "chained-questions-filter",
+        2048,
+        &usr_prompt_2,
+        1024,
+        "question-filter-failed",
+    )
+    .await
     {
         Ok(r) => {
             let questions = parse_questions_from_json(&r);
@@ -329,7 +379,7 @@ Ensure the JSON is properly formatted and ready to be parsed by a JSON parser. D
                 Some(Expire {
                     kind: ExpireKind::Ex,
                     value: 120,
-                })
+                }),
             );
             return questions;
         }
@@ -360,9 +410,8 @@ pub fn parse_questions_from_json(input: &str) -> Vec<String> {
         }
         Err(e) => {
             log::error!("Error parsing JSON: {:?}", e);
-            let re = Regex::new(r#""question_\d+":\s*"([^"]*)""#).expect(
-                "Failed to compile regex pattern"
-            );
+            let re = Regex::new(r#""question_\d+":\s*"([^"]*)""#)
+                .expect("Failed to compile regex pattern");
 
             for cap in re.captures_iter(input) {
                 if let Some(question) = cap.get(1) {
@@ -381,7 +430,7 @@ pub async fn chain_of_chat(
     gen_len_1: u32,
     usr_prompt_2: &str,
     gen_len_2: u32,
-    error_tag: &str
+    error_tag: &str,
 ) -> anyhow::Result<String> {
     let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
 
@@ -395,10 +444,10 @@ pub async fn chain_of_chat(
     let llm = LLMServiceFlows::new(&llm_endpoint);
     match llm.chat_completion("step_1", &usr_prompt_1, &co_1).await {
         Ok(res_1) => {
-            let sys_prompt_2 =
-                serde_json::json!([{"role": "system", "content": sys_prompt_1},
+            let sys_prompt_2 = serde_json::json!([{"role": "system", "content": sys_prompt_1},
     {"role": "user", "content": usr_prompt_1},
-    {"role": "assistant", "content": &res_1.choice}]).to_string();
+    {"role": "assistant", "content": &res_1.choice}])
+            .to_string();
 
             let co_2 = ChatOptions {
                 restart: false,
