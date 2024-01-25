@@ -1,12 +1,12 @@
-use webhook_flows::{ create_endpoint, request_handler, send_response };
-use openai_flows::{ embeddings::{ EmbeddingsInput }, OpenAIFlows };
-use llmservice_flows::{ chat::{ ChatOptions, ChatRole, chat_history }, LLMServiceFlows };
+use flowsnet_platform_sdk::logger;
+use llmservice_flows::{ chat::{ chat_history, ChatOptions, ChatRole }, LLMServiceFlows };
+use openai_flows::{ embeddings::EmbeddingsInput, OpenAIFlows };
+use regex::Regex;
+use serde_json::{ from_str, json, Value };
+use std::collections::HashMap;
 use store_flows::{ get, set, Expire, ExpireKind };
 use vector_store_flows::*;
-use flowsnet_platform_sdk::logger;
-use std::collections::HashMap;
-use serde_json::{ json, Value, from_str };
-use regex::Regex;
+use webhook_flows::{ create_endpoint, request_handler, send_response };
 
 static SOFT_CHAR_LIMIT: usize = 512;
 
@@ -280,31 +280,9 @@ pub async fn search_collection(
 }
 
 pub async fn chat_history_smart(question_list: Vec<String>, restart: bool) -> Vec<String> {
-    // let mut chat_history: Vec<String> = if restart {
-    //     vec![current_q.to_string()]
-    // } else {
-    //     get("chat_history")
-    //         .and_then(|v|
-    //             v.as_array().map(|arr| {
-    //                 arr.iter()
-    //                     .filter_map(|val| val.as_str().map(String::from))
-    //                     .collect()
-    //             })
-    //         )
-    //         .unwrap_or_else(Vec::new)
-    // };
-
-    // if !restart {
-    //     chat_history.push(current_q.to_string());
-    //     if chat_history.len() > 8 {
-    //         chat_history.remove(0);
-    //     }
-    // }
-
     if restart {
         return vec![question_list.last().unwrap().to_string()];
     }
-    let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
 
     let question_list_str = question_list
         .iter()
@@ -313,41 +291,37 @@ pub async fn chat_history_smart(question_list: Vec<String>, restart: bool) -> Ve
         .collect::<Vec<String>>()
         .join("\n");
 
-    let llm = LLMServiceFlows::new(&llm_endpoint);
     let sys_prompt_1 = format!("You're an assistant bot with strong logical thinking.");
 
     let usr_prompt_1 = format!(
-        r#"You are an AI bot that assists a simpler bot, which is tasked with answering questions based on given source material. Your primary duty is to review the history of questions asked, retain the most recent question regardless of its content, and determine the relevance of preceding questions to the source material. Follow these steps:
-1. Always retain the most recent question asked, as it is the current priority for response or action.
-2. Evaluate all preceding questions to determine if they are directly relevant to the source material.
-3. Retain any preceding questions that are directly relevant to the source material and likely to provide context or additional information needed to answer the most recent question.
-4. Remove any preceding questions that are meta-questions, unrelated to the source material, or less than 50% likely to be relevant.
-5. Maintain the order of the retained questions, ensuring the most recent question is listed last.
-When analyzing the provided list of questions, produce a JSON object that includes the retained questions, formatted according to RFC8259 standards. The JSON object should be correctly structured, with proper escaping of special characters, and contain no additional content or formatting.
-Here's how to proceed with the list of questions:
-1. Include the most recent question at the end of the JSON object, regardless of its nature.
-2. Include only relevant preceding questions about the source material in the JSON object before the most recent question.
-3. If no preceding questions are relevant, the JSON object should only contain the most recent question.The list of questions is as follows: 
-{question_list_str}
-Reply with a JSON object in the following format:
+        r#"You are reviewing a list of questions. Your task is to determine the relevance of each question to the source material. For each question in the list, provide a brief explanation of whether it is relevant, partially relevant, or irrelevant to the source material. Here is the list of questions: {question_list_str}
+Please respond with your analysis of the relevance of each question."#
+    );
+
+    let usr_prompt_2 = format!(
+        r#"Using the relevance analysis from Step 1, create a JSON object that includes the questions that have been identified as relevant, plus the most recent question regardless of its relevance. Follow the format specified below and ensure the JSON is properly formatted and ready to be parsed by a JSON parser. Do not add any additional content or formatting outside of what is specified. Here is the format you must use:        
 {{
-\"question_1\": \"original question 1\",
-\"question_2\": \"original question 2\",
+\"question_1\": \"first retained question\",
+...
+\"question_n\": \"most recent question, regardless of relevance\"
 ...
 }}
 Ensure the JSON is properly formatted and ready to be parsed by a JSON parser. Do not add any additional content or formatting outside of what is specified."#
     );
-    let co = ChatOptions {
-        // model: ChatModel::GPT4,
-        restart: true,
-        system_prompt: Some(&sys_prompt_1),
-        token_limit: 1024,
-        ..Default::default()
-    };
 
-    match llm.chat_completion("filter-question-list", &usr_prompt_1, &co).await {
+    match
+        chain_of_chat(
+            &sys_prompt_1,
+            &usr_prompt_1,
+            "chained-questions-filter",
+            2048,
+            &usr_prompt_2,
+            1024,
+            "question-filter-failed"
+        ).await
+    {
         Ok(r) => {
-            let questions = parse_questions_from_json(&r.choice);
+            let questions = parse_questions_from_json(&r);
 
             set(
                 "chat_history",
@@ -398,4 +372,57 @@ pub fn parse_questions_from_json(input: &str) -> Vec<String> {
         }
     }
     questions
+}
+
+pub async fn chain_of_chat(
+    sys_prompt_1: &str,
+    usr_prompt_1: &str,
+    chat_id: &str,
+    gen_len_1: u32,
+    usr_prompt_2: &str,
+    gen_len_2: u32,
+    error_tag: &str
+) -> anyhow::Result<String> {
+    let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
+
+    let co_1 = ChatOptions {
+        restart: true,
+        system_prompt: Some(&sys_prompt_1),
+        token_limit: gen_len_1,
+        ..Default::default()
+    };
+
+    let llm = LLMServiceFlows::new(&llm_endpoint);
+    match llm.chat_completion("step_1", &usr_prompt_1, &co_1).await {
+        Ok(res_1) => {
+            let sys_prompt_2 =
+                serde_json::json!([{"role": "system", "content": sys_prompt_1},
+    {"role": "user", "content": usr_prompt_1},
+    {"role": "assistant", "content": &res_1.choice}]).to_string();
+
+            let co_2 = ChatOptions {
+                restart: false,
+                system_prompt: Some(&sys_prompt_2),
+                token_limit: gen_len_2,
+                ..Default::default()
+            };
+            match llm.chat_completion("step_2", &usr_prompt_2, &co_2).await {
+                Ok(res_2) => {
+                    if res_2.choice.len() < 10 {
+                        log::error!(
+                            "{}, LLM generation went sideway: {:?}",
+                            error_tag,
+                            res_2.choice
+                        );
+                        return Err(anyhow::anyhow!("LLM generation went sideway"));
+                    }
+                    return Ok(res_2.choice);
+                }
+                Err(_e) => log::error!("{}, Step 2 LLM generation error {:?}", error_tag, _e),
+            };
+        }
+        Err(_e) => log::error!("{}, Step 1 LLM generation error {:?}", error_tag, _e),
+    }
+
+    Err(anyhow::anyhow!("LLM generation went sideway"))
 }
