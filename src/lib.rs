@@ -317,15 +317,19 @@ pub async fn chat_history_smart(question_list: Vec<String>, restart: bool) -> Ve
     let sys_prompt_1 = format!("You're an assistant bot with strong logical thinking.");
 
     let usr_prompt_1 = format!(
-        r#"You are an AI bot that assists a simpler bot, which is tasked with answering questions based on given source material. Your job is to review the history of questions asked and determine the relevance of the most recent question to the source material. If the most recent question is relevant to the source material, assess the relevance of preceding questions, filtering out any that are less than 50% likely to be relevant. If the most recent question is not about the source material at all, remove all preceding questions and retain only the most recent question. Maintain the order of the relevant questions.
-        Please analyze the list of questions provided in the format below and produce a JSON object with only the relevant questions, formatted according to RFC8259 standards. Make sure the JSON object is correctly structured, with proper escaping of special characters, and does not include any non-JSON content or formatting.
-        The list of questions is as follows: 
+        r#"You are an AI bot that assists a simpler bot, which is tasked with answering questions based on given source material. Your primary duty is to review the history of questions asked and determine their relevance to the source material. You must:
+1. Determine whether the most recent question pertains to the source material directly.
+2. If the most recent question is a meta-question (e.g., asking to generate new questions based on the source material), consider it irrelevant to the task of answering questions about the source material itself.
+3. If the most recent question is relevant to the source material, evaluate the preceding questions, filtering out any that are less than 50% likely to be relevant or are meta-questions.
+4. If the most recent question is not about the source material or is a meta-question, remove all preceding questions and retain only the most recent question if it is a direct inquiry about the source material.
+5. Maintain the order of relevant, direct questions about the source material.        
+The list of questions is as follows: 
 {question_list_str}
 Reply with a JSON object in the following format:
 {{
-    \"question_1\": \"original question 1\",
-    \"question_2\": \"original question 2\",
-    ...
+\"question_1\": \"original question 1\",
+\"question_2\": \"original question 2\",
+...
 }}
 Ensure the JSON is properly formatted and ready to be parsed by a JSON parser. Do not add any additional content or formatting outside of what is specified."#
     );
