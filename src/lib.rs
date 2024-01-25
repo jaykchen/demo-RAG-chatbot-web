@@ -372,7 +372,7 @@ Confirm that the irrelevant questions have been omitted, and provide the correct
     {
         Ok(r) => {
             let questions = parse_questions_from_json(&r);
-
+log::info!("Parsed questions from JSON: {:?}", questions.clone());
             set(
                 "chat_history",
                 serde_json::json!(questions),
