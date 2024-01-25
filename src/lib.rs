@@ -1,12 +1,11 @@
 use webhook_flows::{ create_endpoint, request_handler, send_response };
 use openai_flows::{ embeddings::{ EmbeddingsInput }, OpenAIFlows };
 use llmservice_flows::{ chat::{ ChatOptions, ChatRole, chat_history }, LLMServiceFlows };
-use store_flows::{ get, set };
+use store_flows::{ get, set, Expire, ExpireKind };
 use vector_store_flows::*;
 use flowsnet_platform_sdk::logger;
 use std::collections::HashMap;
-use serde_json::json;
-use serde_json::Value;
+use serde_json::{ json, Value, from_str };
 use regex::Regex;
 
 static SOFT_CHAR_LIMIT: usize = 512;
@@ -69,20 +68,19 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
     if !restart {
         match chat_history(&chat_id.to_string(), 8) {
             Some(v) => {
-                for m in v.into_iter() {
-                    if let ChatRole::User = m.role {
-                        question_history.push_str(&m.content);
-                        question_history.push_str("\n");
-                    }
-                }
+                let question_list = v
+                    .into_iter()
+                    .filter_map(|m| {
+                        if let ChatRole::User = m.role { Some(m.content) } else { None }
+                    })
+                    .collect::<Vec<String>>();
+                question_history = chat_history_smart(question_list, restart).await.join("\n");
             }
             None => (),
         };
     }
-    question_history.push_str(&text);
     log::debug!("The question history is {}", question_history);
 
-    // Compute embedding for the question
     let question_vector = match
         openai.create_embeddings(EmbeddingsInput::String(question_history)).await
     {
@@ -279,4 +277,117 @@ pub async fn search_collection(
             return;
         }
     }
+}
+
+pub async fn chat_history_smart(question_list: Vec<String>, restart: bool) -> Vec<String> {
+    // let mut chat_history: Vec<String> = if restart {
+    //     vec![current_q.to_string()]
+    // } else {
+    //     get("chat_history")
+    //         .and_then(|v|
+    //             v.as_array().map(|arr| {
+    //                 arr.iter()
+    //                     .filter_map(|val| val.as_str().map(String::from))
+    //                     .collect()
+    //             })
+    //         )
+    //         .unwrap_or_else(Vec::new)
+    // };
+
+    // if !restart {
+    //     chat_history.push(current_q.to_string());
+    //     if chat_history.len() > 8 {
+    //         chat_history.remove(0);
+    //     }
+    // }
+
+    if restart {
+        return vec![question_list.last().unwrap().to_string()];
+    }
+    let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
+
+    let question_list_str = question_list
+        .iter()
+        .enumerate()
+        .map(|(i, q)| format!("{}: {}", i + 1, q))
+        .collect::<Vec<String>>()
+        .join("\n");
+
+    let llm = LLMServiceFlows::new(&llm_endpoint);
+    let sys_prompt_1 = format!("You're an assistant bot with strong logical thinking.");
+
+    let usr_prompt_1 = format!(
+        r#"You are an AI bot that assists a simpler bot, which is tasked with answering questions based on given source material. Your job is to review the history of questions asked and determine the relevance of the most recent question to the source material. If the most recent question is relevant to the source material, assess the relevance of preceding questions, filtering out any that are less than 50% likely to be relevant. If the most recent question is not about the source material at all, remove all preceding questions and retain only the most recent question. Maintain the order of the relevant questions.
+        Please analyze the list of questions provided in the format below and produce a JSON object with only the relevant questions, formatted according to RFC8259 standards. Make sure the JSON object is correctly structured, with proper escaping of special characters, and does not include any non-JSON content or formatting.
+        The list of questions is as follows: 
+{question_list_str}
+Reply with a JSON object in the following format:
+{{
+    \"question_1\": \"original question 1\",
+    \"question_2\": \"original question 2\",
+    ...
+}}
+Ensure the JSON is properly formatted and ready to be parsed by a JSON parser. Do not add any additional content or formatting outside of what is specified."#
+    );
+    let co = ChatOptions {
+        // model: ChatModel::GPT4,
+        restart: true,
+        system_prompt: Some(&sys_prompt_1),
+        token_limit: 1024,
+        ..Default::default()
+    };
+
+    match llm.chat_completion("filter-question-list", &usr_prompt_1, &co).await {
+        Ok(r) => {
+            let questions = parse_questions_from_json(&r.choice);
+
+            set(
+                "chat_history",
+                serde_json::json!(questions),
+                Some(Expire {
+                    kind: ExpireKind::Ex,
+                    value: 120,
+                })
+            );
+            return questions;
+        }
+        Err(_e) => {
+            log::error!("LLM returns error");
+
+            vec![]
+        }
+    }
+}
+
+pub fn parse_questions_from_json(input: &str) -> Vec<String> {
+    let mut questions: Vec<String> = Vec::new();
+
+    let parsed_result: Result<Value, serde_json::Error> = from_str(input);
+
+    match parsed_result {
+        Ok(parsed) => {
+            for (key, value) in parsed.as_object().unwrap().iter() {
+                if key.starts_with("question_") {
+                    if let Some(question) = value.as_str() {
+                        questions.push(question.to_string());
+                    } else {
+                        log::error!("Value for '{}' key is not a string", key);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Error parsing JSON: {:?}", e);
+            let re = Regex::new(r#""question_\d+":\s*"([^"]*)""#).expect(
+                "Failed to compile regex pattern"
+            );
+
+            for cap in re.captures_iter(input) {
+                if let Some(question) = cap.get(1) {
+                    questions.push(question.as_str().to_string());
+                }
+            }
+        }
+    }
+    questions
 }
