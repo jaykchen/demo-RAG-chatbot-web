@@ -163,7 +163,7 @@ pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String
 pub async fn search_collection(
     question: &str,
     collection_name: &str
-) -> anyhow::Result<Vec<(i64, String)>> {
+) -> anyhow::Result<Vec<(u64, String)>> {
     let mut openai = OpenAIFlows::new();
     openai.set_retry_times(3);
 
@@ -204,7 +204,10 @@ pub async fn search_collection(
                     )
                 );
                 let p_text = p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap();
-                let p_id = p.payload.as_ref().unwrap().get("id").unwrap().as_i64().unwrap();
+                let p_id = match p.id {
+                    PointId::Num(i) => i,
+                    _ => 0,
+                };
                 if p.score > 0.75 {
                     found_content.push((p_id, p_text.to_string()));
                 }
@@ -392,7 +395,7 @@ pub async fn process_with_rag(
     );
     let raw_found_vec = search_collection(&raw_input_question, &cs.collection_name).await?;
 
-    let mut raw_found_combined = raw_found_vec.into_iter().collect::<HashMap<i64, String>>();
+    let mut raw_found_combined = raw_found_vec.into_iter().collect::<HashMap<u64, String>>();
 
     // log::debug!("The prompt is {} chars starting with {}", system_prompt_updated.len(), first_x_chars(&system_prompt_updated, 256));
 
