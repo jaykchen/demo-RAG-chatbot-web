@@ -96,7 +96,7 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
         restart: restart,
         system_prompt: Some(system_prompt.as_str()),
         post_prompt: Some(&cs.post_prompt),
-        token_limit: 1024,
+        token_limit: 2048,
         ..Default::default()
     };
 
@@ -266,9 +266,9 @@ Confirm that the irrelevant questions have been omitted, and provide the correct
             &sys_prompt_1,
             &usr_prompt_1,
             "chained-questions-filter",
-            1024,
+            4096,
             &usr_prompt_2,
-            768,
+            2048,
             "question-filter-failed"
         ).await
     {
