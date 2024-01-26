@@ -8,14 +8,60 @@ use std::collections::HashMap;
 use store_flows::{ get, set, Expire, ExpireKind };
 use vector_store_flows::*;
 use webhook_flows::{ create_endpoint, request_handler, send_response };
+use itertools::Itertools;
 
 #[derive(Debug, Clone)]
 pub struct ContentSettings {
+    initial_system_prompt: String,
     pub system_prompt: String,
-    pub post_prompt: String,
-    pub error_mesg: String,
-    pub no_answer_mesg: String,
-    pub collection_name: String,
+    post_prompt: String,
+    error_mesg: String,
+    no_answer_mesg: String,
+    collection_name: String,
+}
+
+impl ContentSettings {
+    pub fn new(
+        initial_system_prompt: String,
+        system_prompt: String,
+        post_prompt: String,
+        error_mesg: String,
+        no_answer_mesg: String,
+        collection_name: String
+    ) -> Self {
+        Self {
+            initial_system_prompt,
+            system_prompt,
+            post_prompt,
+            error_mesg,
+            no_answer_mesg,
+            collection_name,
+        }
+    }
+
+    pub fn update(&mut self, system_prompt: String) {
+        self.system_prompt = system_prompt;
+    }
+
+    pub fn reset(&mut self) {
+        self.system_prompt = self.initial_system_prompt.clone();
+    }
+
+    pub fn post_prompt(&self) -> &str {
+        &self.post_prompt
+    }
+
+    pub fn error_mesg(&self) -> &str {
+        &self.error_mesg
+    }
+
+    pub fn no_answer_mesg(&self) -> &str {
+        &self.no_answer_mesg
+    }
+
+    pub fn collection_name(&self) -> &str {
+        &self.collection_name
+    }
 }
 
 #[no_mangle]
@@ -28,13 +74,14 @@ pub async fn on_deploy() {
 async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, body: Vec<u8>) {
     logger::init();
     let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
-    let cs = &(ContentSettings {
+    let mut cs = ContentSettings {
+        initial_system_prompt: std::env::var("system_prompt").unwrap_or("".to_string()),
         system_prompt: std::env::var("system_prompt").unwrap_or("".to_string()),
         post_prompt: std::env::var("post_prompt").unwrap_or("".to_string()),
         error_mesg: std::env::var("error_mesg").unwrap_or("".to_string()),
         no_answer_mesg: std::env::var("no_answer_mesg").unwrap_or("No answer".to_string()),
         collection_name: std::env::var("collection_name").unwrap_or("".to_string()),
-    });
+    };
     log::info!("The system prompt is {} lines", cs.system_prompt.lines().count());
 
     // log::info!("Headers -- {:?}", headers);
@@ -80,7 +127,6 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
         };
     }
     log::info!("The question history is {:?}", question_history);
-    let mut system_prompt = String::from("You're an AI assistant bot");
     if !no_rag {
         let mut found_content = process_with_rag(
             question_history.join("\n"),
@@ -88,13 +134,13 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
             &cs
         ).await.expect("Failed to process with RAG");
 
-        system_prompt = cs.system_prompt.to_string() + &found_content;
+        cs.update(cs.system_prompt.to_string() + &found_content);
     }
 
     let co = ChatOptions {
         // model: ChatModel::GPT4,
         restart: restart,
-        system_prompt: Some(system_prompt.as_str()),
+        system_prompt: Some(cs.system_prompt.as_str()),
         post_prompt: Some(&cs.post_prompt),
         token_limit: 2048,
         ..Default::default()
@@ -115,6 +161,7 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
     if restart {
         log::info!("Detected restart = true");
         set(&chat_id.to_string(), json!(false), None);
+        cs.reset();
     }
 }
 
@@ -417,4 +464,76 @@ pub async fn process_with_rag(
         .join("\n");
 
     Ok(found_combined)
+}
+
+pub async fn is_relevant(
+    question_1: &str,
+    question_2: &str,
+    collection_tagline: &str,
+    collection_name: &str
+) -> anyhow::Result<Vec<(u64, String)>> {
+    let mut openai = OpenAIFlows::new();
+    openai.set_retry_times(3);
+
+    let embedding_input = EmbeddingsInput::Vec(
+        vec![question_1.to_string(), question_2.to_string(), collection_tagline.to_string()]
+    );
+
+    let (q1_vector, q2_vector, collection_vector) = match
+        openai.create_embeddings(embedding_input).await
+    {
+        Ok(r) => {
+            if r.len() < 1 {
+                log::error!("LLM returned no embedding for the question");
+                return Err(anyhow::anyhow!("LLM returned no embedding for the question"));
+            }
+            r.into_iter()
+                .map(|v|
+                    v
+                        .iter()
+                        .map(|n| *n as f32)
+                        .collect()
+                )
+                .take(3)
+                .collect_tuple()
+                .unwrap()
+        }
+        Err(_e) => {
+            log::error!("LLM returned an error: {}", _e);
+            return Err(anyhow::anyhow!("LLM returned no embedding for the question"));
+        }
+    };
+
+    let p = PointsSearchParams {
+        vector: question_vector,
+        limit: 5,
+    };
+    let mut found_content = Vec::new();
+
+    match search_points(&collection_name, &p).await {
+        Ok(sp) => {
+            for p in sp.iter() {
+                log::debug!(
+                    "Received vector score={} and text={}",
+                    p.score,
+                    first_x_chars(
+                        p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap(),
+                        256
+                    )
+                );
+                let p_text = p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap();
+                let p_id = match p.id {
+                    PointId::Num(i) => i,
+                    _ => 0,
+                };
+                if p.score > 0.75 {
+                    found_content.push((p_id, p_text.to_string()));
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Vector search returns error: {}", e);
+        }
+    }
+    Ok(found_content)
 }
