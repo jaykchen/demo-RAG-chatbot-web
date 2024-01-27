@@ -416,9 +416,11 @@ pub async fn is_relevant(current_q: &str, previous_q: &str) -> bool {
     let q2 = DVector::from_vec(previous_q_vector);
     let score = q1.dot(&q2);
 
-    log::debug!("Cosine similarity between current question and previous question: {score}");
+    let head = current_q.chars().take(32).collect::<String>();
+    let tail = previous_q.chars().take(32).collect::<String>();
+    log::debug!("similarity: {score} between {head} and {tail}");
 
-    score > 0.75
+    score > 0.8
 }
 
 pub async fn last_2_chats(current_q: &str, chat_id: &str) -> String {
