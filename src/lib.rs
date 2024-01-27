@@ -471,7 +471,9 @@ pub async fn is_relevant(
     question_2: &str,
     collection_tagline: &str,
     collection_name: &str
-) -> anyhow::Result<Vec<(u64, String)>> {
+) -> anyhow::Result<bool> {
+    use nalgebra::DVector;
+
     let mut openai = OpenAIFlows::new();
     openai.set_retry_times(3);
 
@@ -504,36 +506,11 @@ pub async fn is_relevant(
         }
     };
 
-    let p = PointsSearchParams {
-        vector: question_vector,
-        limit: 5,
-    };
-    let mut found_content = Vec::new();
+    let q1 = DVector::from_vec(q1_vector);
+    let q2 = DVector::from_vec(q2_vector);
+    let c = DVector::from_vec(collection_vector);
 
-    match search_points(&collection_name, &p).await {
-        Ok(sp) => {
-            for p in sp.iter() {
-                log::debug!(
-                    "Received vector score={} and text={}",
-                    p.score,
-                    first_x_chars(
-                        p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap(),
-                        256
-                    )
-                );
-                let p_text = p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap();
-                let p_id = match p.id {
-                    PointId::Num(i) => i,
-                    _ => 0,
-                };
-                if p.score > 0.75 {
-                    found_content.push((p_id, p_text.to_string()));
-                }
-            }
-        }
-        Err(e) => {
-            log::error!("Vector search returns error: {}", e);
-        }
-    }
-    Ok(found_content)
+    let similarity = q1.dot(&q2);
+    println!("Cosine similarity: {}", similarity);
+    Ok(similarity > 0.75)
 }
