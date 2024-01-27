@@ -1,14 +1,21 @@
 use anyhow;
 use flowsnet_platform_sdk::logger;
-use llmservice_flows::{ chat::{ chat_history, ChatOptions, ChatRole }, LLMServiceFlows };
-use openai_flows::{ embeddings::EmbeddingsInput, OpenAIFlows };
-use regex::Regex;
-use serde_json::{ from_str, json, Value };
-use std::collections::HashMap;
-use store_flows::{ get, set, Expire, ExpireKind };
-use vector_store_flows::*;
-use webhook_flows::{ create_endpoint, request_handler, send_response };
 use itertools::Itertools;
+use llmservice_flows::{
+    chat::{chat_history, ChatOptions, ChatRole},
+    LLMServiceFlows,
+};
+use openai_flows::{embeddings::EmbeddingsInput, OpenAIFlows};
+use regex::Regex;
+use serde_json::{from_str, json, Value};
+use std::collections::HashMap;
+use store_flows::{
+    get,
+    set,
+    // Expire, ExpireKind
+};
+use vector_store_flows::*;
+use webhook_flows::{create_endpoint, request_handler, send_response};
 
 #[derive(Debug, Clone)]
 pub struct ContentSettings {
@@ -27,7 +34,7 @@ impl ContentSettings {
         post_prompt: String,
         error_mesg: String,
         no_answer_mesg: String,
-        collection_name: String
+        collection_name: String,
     ) -> Self {
         Self {
             initial_system_prompt,
@@ -118,24 +125,30 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
 
     let mut user_prompt = String::new();
     if !restart {
-        let accumulated_chat = last_2_answers(text, &chat_id).await;
-        log::info!("The question history is {:?}", accumulated_chat);
-        // let accumulated_chat = last_2_chats(text, &chat_id).await;
-        // log::info!("The question history is {:?}", accumulated_chat);
+        let hypo_answer = create_hypothetical_answer(&text)
+            .await
+            .unwrap_or(String::new());
+        let last_3_relevant_answers = last_3_relevant_answers(&hypo_answer, &chat_id).await;
+        log::info!("The answer history is {:?}", last_3_relevant_answers);
 
-        match
-            is_relevant(text, "This source material is a technical document on Kubernetes.").await
+        match is_relevant(
+            text,
+            "This source material is a technical document on Kubernetes.",
+        )
+        .await
         {
             true => {
-                cs.update(accumulated_chat.clone());
+                cs.update(last_3_relevant_answers.clone());
 
-                let rag_content = get_rag_content(text, &cs).await.unwrap_or(String::new());
+                let rag_content = get_rag_content(text, &hypo_answer, &cs)
+                    .await
+                    .unwrap_or(String::new());
                 user_prompt = format!(
-                    "Given the source material retrieved: `{rag_content}`, Here is the question you're to reply now: `{text}`. Please provide a concise answer, stay truthful and factual."
+                    "Given the context: `{rag_content}`, Here is the question you're to reply now: `{text}`. Please provide a concise answer, stay truthful and factual."
                 );
             }
             false => {
-                cs.mutate(String::from("You're a question and answer bot.") + &accumulated_chat);
+                cs.mutate(String::from("You're a question and answer bot.") + &last_3_relevant_answers);
 
                 user_prompt = format!(
                     "Here is the question you're to reply now: `{text}`. Please provide a concise answer."
@@ -153,7 +166,10 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
         ..Default::default()
     };
 
-    match llm.chat_completion(&chat_id.to_string(), &user_prompt, &co).await {
+    match llm
+        .chat_completion(&chat_id.to_string(), &user_prompt, &co)
+        .await
+    {
         Ok(r) => {
             reply(&r.choice);
         }
@@ -185,7 +201,7 @@ fn reply(s: &str) {
     send_response(
         200,
         vec![(String::from("content-type"), String::from("text/html"))],
-        s.as_bytes().to_vec()
+        s.as_bytes().to_vec(),
     );
 }
 
@@ -193,9 +209,8 @@ pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String
     let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
 
     let llm = LLMServiceFlows::new(&llm_endpoint);
-    let sys_prompt_1 = format!(
-        "You're an assistant bot with expertise in all domains of human knowledge."
-    );
+    let sys_prompt_1 =
+        format!("You're an assistant bot with expertise in all domains of human knowledge.");
 
     let usr_prompt_1 = format!(
         "You're preparing to answer questions about a specific source material, before ingesting the source material, you need to answer the question based on the knowledge you're trained on, here it is: `{question}`, please provide a concise answer in one paragraph, stay truthful and factual."
@@ -208,7 +223,10 @@ pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String
         ..Default::default()
     };
 
-    if let Ok(r) = llm.chat_completion("create-hypo-answer", &usr_prompt_1, &co).await {
+    if let Ok(r) = llm
+        .chat_completion("create-hypo-answer", &usr_prompt_1, &co)
+        .await
+    {
         return Ok(r.choice);
     }
     Err(anyhow::anyhow!("LLM generation went sideway"))
@@ -216,27 +234,29 @@ pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String
 
 pub async fn search_collection(
     question: &str,
-    collection_name: &str
+    collection_name: &str,
 ) -> anyhow::Result<Vec<(u64, String)>> {
     let mut openai = OpenAIFlows::new();
     openai.set_retry_times(3);
 
-    let question_vector = match
-        openai.create_embeddings(EmbeddingsInput::String(question.to_string())).await
+    let question_vector = match openai
+        .create_embeddings(EmbeddingsInput::String(question.to_string()))
+        .await
     {
         Ok(r) => {
             if r.len() < 1 {
                 log::error!("LLM returned no embedding for the question");
-                return Err(anyhow::anyhow!("LLM returned no embedding for the question"));
+                return Err(anyhow::anyhow!(
+                    "LLM returned no embedding for the question"
+                ));
             }
-            r[0]
-                .iter()
-                .map(|n| *n as f32)
-                .collect()
+            r[0].iter().map(|n| *n as f32).collect()
         }
         Err(_e) => {
             log::error!("LLM returned an error: {}", _e);
-            return Err(anyhow::anyhow!("LLM returned no embedding for the question"));
+            return Err(anyhow::anyhow!(
+                "LLM returned no embedding for the question"
+            ));
         }
     };
 
@@ -253,11 +273,24 @@ pub async fn search_collection(
                     "Received vector score={} and text={}",
                     p.score,
                     first_x_chars(
-                        p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap(),
+                        p.payload
+                            .as_ref()
+                            .unwrap()
+                            .get("text")
+                            .unwrap()
+                            .as_str()
+                            .unwrap(),
                         256
                     )
                 );
-                let p_text = p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap();
+                let p_text = p
+                    .payload
+                    .as_ref()
+                    .unwrap()
+                    .get("text")
+                    .unwrap()
+                    .as_str()
+                    .unwrap();
                 let p_id = match p.id {
                     PointId::Num(i) => i,
                     _ => 0,
@@ -293,9 +326,8 @@ pub fn parse_questions_from_json(input: &str) -> Vec<String> {
         }
         Err(e) => {
             log::error!("Error parsing JSON: {:?}", e);
-            let re = Regex::new(r#""question_\d+":\s*"([^"]*)""#).expect(
-                "Failed to compile regex pattern"
-            );
+            let re = Regex::new(r#""question_\d+":\s*"([^"]*)""#)
+                .expect("Failed to compile regex pattern");
 
             for cap in re.captures_iter(input) {
                 if let Some(question) = cap.get(1) {
@@ -314,7 +346,7 @@ pub async fn chain_of_chat(
     gen_len_1: u32,
     usr_prompt_2: &str,
     gen_len_2: u32,
-    error_tag: &str
+    error_tag: &str,
 ) -> anyhow::Result<String> {
     let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
 
@@ -328,10 +360,10 @@ pub async fn chain_of_chat(
     let llm = LLMServiceFlows::new(&llm_endpoint);
     match llm.chat_completion("step_1", &usr_prompt_1, &co_1).await {
         Ok(res_1) => {
-            let sys_prompt_2 =
-                serde_json::json!([{"role": "system", "content": sys_prompt_1},
+            let sys_prompt_2 = serde_json::json!([{"role": "system", "content": sys_prompt_1},
     {"role": "user", "content": usr_prompt_1},
-    {"role": "assistant", "content": &res_1.choice}]).to_string();
+    {"role": "assistant", "content": &res_1.choice}])
+            .to_string();
 
             let co_2 = ChatOptions {
                 restart: false,
@@ -360,14 +392,14 @@ pub async fn chain_of_chat(
     Err(anyhow::anyhow!("LLM generation went sideway"))
 }
 
-pub async fn get_rag_content(text: &str, cs: &ContentSettings) -> anyhow::Result<String> {
+pub async fn get_rag_content(
+    text: &str,
+    hypo_answer: &str,
+    cs: &ContentSettings,
+) -> anyhow::Result<String> {
     let raw_found_vec = search_collection(&text, &cs.collection_name).await?;
 
     let mut raw_found_combined = raw_found_vec.into_iter().collect::<HashMap<u64, String>>();
-
-    // use LLM's existing knowledge to answer the question, use the answer
-    // that contains more information to retrieve source material that may missed the first search
-    let hypo_answer = create_hypothetical_answer(&text).await?;
 
     // use the additional source material found to update the context for answer generation
     let found_vec = search_collection(&hypo_answer, &cs.collection_name).await?;
@@ -393,98 +425,54 @@ pub async fn is_relevant(current_q: &str, previous_q: &str) -> bool {
 
     let embedding_input = EmbeddingsInput::Vec(vec![current_q.to_string(), previous_q.to_string()]);
 
-    let (current_q_vector, previous_q_vector) = match
-        openai.create_embeddings(embedding_input).await
-    {
-        Ok(r) if r.len() >= 2 =>
-            r
+    let (current_q_vector, previous_q_vector) =
+        match openai.create_embeddings(embedding_input).await {
+            Ok(r) if r.len() >= 2 => r
                 .into_iter()
-                .map(|v|
-                    v
-                        .iter()
-                        .map(|&n| n as f32)
-                        .collect::<Vec<f32>>()
-                )
+                .map(|v| v.iter().map(|&n| n as f32).collect::<Vec<f32>>())
                 .take(2)
                 .collect_tuple()
                 .unwrap_or((Vec::<f32>::new(), Vec::<f32>::new())),
-        _ => {
-            log::error!("LLM returned an error");
-            return false;
-        }
-    };
+            _ => {
+                log::error!("LLM returned an error");
+                return false;
+            }
+        };
 
     let q1 = DVector::from_vec(current_q_vector);
     let q2 = DVector::from_vec(previous_q_vector);
     let score = q1.dot(&q2);
 
-    let head = current_q.chars().take(32).collect::<String>();
-    let tail = previous_q.chars().take(32).collect::<String>();
+    let head = current_q.chars().take(100).collect::<String>();
+    let tail = previous_q.chars().take(100).collect::<String>();
     log::debug!("similarity: {score} between {head} and {tail}");
 
-    score > 0.8
+    score > 0.75
 }
 
-pub async fn last_2_chats(current_q: &str, chat_id: &str) -> String {
-    let mut accumulated_chat = String::new();
-    match chat_history(&chat_id.to_string(), 2) {
-        Some(v) => {
-            let question_list = v
-                .into_iter()
-                .filter_map(|m| {
-                    let mut tup: (String, String) = ("".to_string(), "".to_string());
-                    match m.role {
-                        ChatRole::User => {
-                            tup.0 = m.content;
-                        }
-                        ChatRole::Assistant => {
-                            tup.1 = m.content;
-                        }
-                    }
 
-                    if !tup.0.is_empty() || !tup.1.is_empty() {
-                        Some(tup)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<(String, String)>>();
 
-            for (q, a) in question_list {
-                if is_relevant(current_q, &q).await {
-                    let one_round_chat = format!("User asked: `{}` \n You answered: `{}` \n", q, a);
-                    accumulated_chat.push_str(&one_round_chat);
-                }
-            }
-        }
-        None => (),
-    }
-
-    accumulated_chat
-}
-
-pub async fn last_2_answers(current_q: &str, chat_id: &str) -> String {
+pub async fn last_3_relevant_answers(hypo_answer: &str, chat_id: &str) -> String {
     let mut accumulated_answers = String::new();
-    match chat_history(&chat_id.to_string(), 2) {
-        Some(v) => {
-            let answer_list = v
-                .into_iter()
-                .filter_map(|m| {
-                    match m.role {
-                        ChatRole::Assistant => Some(m.content),
-                        _ => None,
+    let mut count = 0;
+    if let Some(v) = chat_history(&chat_id.to_string(), 8) {
+        for m in v.into_iter().rev() {
+            match m.role {
+                ChatRole::Assistant => {
+                    if is_relevant(hypo_answer, &m.content).await {
+                        let one_round_anwser =
+                            format!("User asked a question, you answered: `{}` \n", m.content);
+                        accumulated_answers.push_str(&one_round_anwser);
+                        count += 1;
                     }
-                })
-                .collect::<Vec<String>>();
 
-            for a in answer_list {
-                if is_relevant(current_q, &a).await {
-                    let one_round_anwser = format!("User asked a question, you answered: `{}` \n", a);
-                    accumulated_answers.push_str(&one_round_anwser);
+                    if count > 2 {
+                        break;
+                    }
                 }
+                _ => (),
             }
         }
-        None => (),
     }
 
     accumulated_answers
