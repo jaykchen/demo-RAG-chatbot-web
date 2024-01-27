@@ -39,8 +39,12 @@ impl ContentSettings {
         }
     }
 
-    pub fn update(&mut self, system_prompt: String) {
-        self.system_prompt = system_prompt;
+    pub fn mutate(&mut self, new_prompt: String) {
+        self.system_prompt = new_prompt;
+    }
+
+    pub fn update(&mut self, new_content: String) {
+        self.system_prompt = self.system_prompt.clone() + &new_content;
     }
 
     pub fn reset(&mut self) {
@@ -82,7 +86,6 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
         no_answer_mesg: std::env::var("no_answer_mesg").unwrap_or("No answer".to_string()),
         collection_name: std::env::var("collection_name").unwrap_or("".to_string()),
     };
-    log::info!("The system prompt is {} lines", cs.system_prompt.lines().count());
 
     // log::info!("Headers -- {:?}", headers);
     let mut chat_id = "".to_string();
@@ -110,31 +113,30 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
         None => false,
     };
 
-    let mut no_rag = false;
-    let mut question_history = Vec::new();
+    let mut user_prompt = String::new();
     if !restart {
-        match chat_history(&chat_id.to_string(), 8) {
-            Some(v) => {
-                let question_list = v
-                    .into_iter()
-                    .filter_map(|m| {
-                        if let ChatRole::User = m.role { Some(m.content) } else { None }
-                    })
-                    .collect::<Vec<String>>();
-                (question_history, no_rag) = chat_history_smart(question_list, restart).await;
-            }
-            None => (),
-        };
-    }
-    log::info!("The question history is {:?}", question_history);
-    if !no_rag {
-        let mut found_content = process_with_rag(
-            question_history.join("\n"),
-            text,
-            &cs
-        ).await.expect("Failed to process with RAG");
+        let accumulated_chat = last_2_chats(text, &chat_id).await;
+        log::info!("The question history is {:?}", accumulated_chat);
 
-        cs.update(cs.system_prompt.to_string() + &found_content);
+        match
+            is_relevant(text, "This source material is a technical document on Kubernetes.").await
+        {
+            true => {
+                cs.update(accumulated_chat.clone());
+
+                let rag_content = get_rag_content(text, &cs).await.unwrap_or(String::new());
+                user_prompt = format!(
+                    "Given the source material retrieved: `{rag_content}`, Here is the question you're to reply now: `{text}`. Please provide a concise answer, stay truthful and factual."
+                );
+            }
+            false => {
+                cs.mutate(String::from("You're a question and answer bot.") + &accumulated_chat);
+
+                user_prompt = format!(
+                    "Here is the question you're to reply now: `{text}`. Please provide a concise answer."
+                );
+            }
+        }
     }
 
     let co = ChatOptions {
@@ -146,13 +148,13 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
         ..Default::default()
     };
 
-    match llm.chat_completion(&chat_id.to_string(), &text, &co).await {
+    match llm.chat_completion(&chat_id.to_string(), &user_prompt, &co).await {
         Ok(r) => {
             reply(&r.choice);
         }
         Err(e) => {
             reply(&cs.error_mesg);
-            log::error!("OpenAI returns error: {}", e);
+            log::error!("LLM returns error: {}", e);
             return;
         }
     }
@@ -237,7 +239,7 @@ pub async fn search_collection(
         vector: question_vector,
         limit: 5,
     };
-    let mut found_content = Vec::new();
+    let mut rag_content = Vec::new();
 
     match search_points(&collection_name, &p).await {
         Ok(sp) => {
@@ -256,7 +258,7 @@ pub async fn search_collection(
                     _ => 0,
                 };
                 if p.score > 0.75 {
-                    found_content.push((p_id, p_text.to_string()));
+                    rag_content.push((p_id, p_text.to_string()));
                 }
             }
         }
@@ -264,7 +266,7 @@ pub async fn search_collection(
             log::error!("Vector search returns error: {}", e);
         }
     }
-    Ok(found_content)
+    Ok(rag_content)
 }
 
 pub async fn chat_history_smart(question_list: Vec<String>, restart: bool) -> (Vec<String>, bool) {
@@ -432,25 +434,16 @@ pub async fn chain_of_chat(
     Err(anyhow::anyhow!("LLM generation went sideway"))
 }
 
-pub async fn process_with_rag(
-    question_history: String,
-    text: &str,
-    cs: &ContentSettings
-) -> anyhow::Result<String> {
-    let raw_input_question = format!(
-        "This is the list of questions you were asked: `{question_history}`, here is the question you're to reply now: `{text}`."
-    );
-    let raw_found_vec = search_collection(&raw_input_question, &cs.collection_name).await?;
+pub async fn get_rag_content(text: &str, cs: &ContentSettings) -> anyhow::Result<String> {
+    let raw_found_vec = search_collection(&text, &cs.collection_name).await?;
 
     let mut raw_found_combined = raw_found_vec.into_iter().collect::<HashMap<u64, String>>();
-
-    // log::debug!("The prompt is {} chars starting with {}", system_prompt_updated.len(), first_x_chars(&system_prompt_updated, 256));
 
     // use LLM's existing knowledge to answer the question, use the answer
     // that contains more information to retrieve source material that may missed the first search
     let hypo_answer = create_hypothetical_answer(&text).await?;
 
-    // use the additional source material found to enrich the context for answer generation
+    // use the additional source material found to update the context for answer generation
     let found_vec = search_collection(&hypo_answer, &cs.collection_name).await?;
 
     for (id, text) in found_vec {
@@ -466,51 +459,78 @@ pub async fn process_with_rag(
     Ok(found_combined)
 }
 
-pub async fn is_relevant(
-    question_1: &str,
-    question_2: &str,
-    collection_tagline: &str,
-    collection_name: &str
-) -> anyhow::Result<bool> {
+pub async fn is_relevant(current_q: &str, previous_q: &str) -> bool {
     use nalgebra::DVector;
 
     let mut openai = OpenAIFlows::new();
     openai.set_retry_times(3);
 
-    let embedding_input = EmbeddingsInput::Vec(
-        vec![question_1.to_string(), question_2.to_string(), collection_tagline.to_string()]
-    );
+    let embedding_input = EmbeddingsInput::Vec(vec![current_q.to_string(), previous_q.to_string()]);
 
-    let (q1_vector, q2_vector, collection_vector) = match
+    let (current_q_vector, previous_q_vector) = match
         openai.create_embeddings(embedding_input).await
     {
-        Ok(r) => {
-            if r.len() < 1 {
-                log::error!("LLM returned no embedding for the question");
-                return Err(anyhow::anyhow!("LLM returned no embedding for the question"));
-            }
-            r.into_iter()
+        Ok(r) if r.len() >= 2 =>
+            r
+                .into_iter()
                 .map(|v|
                     v
                         .iter()
-                        .map(|n| *n as f32)
-                        .collect()
+                        .map(|&n| n as f32)
+                        .collect::<Vec<f32>>()
                 )
-                .take(3)
+                .take(2)
                 .collect_tuple()
-                .unwrap()
-        }
-        Err(_e) => {
-            log::error!("LLM returned an error: {}", _e);
-            return Err(anyhow::anyhow!("LLM returned no embedding for the question"));
+                .unwrap_or((Vec::<f32>::new(), Vec::<f32>::new())),
+        _ => {
+            log::error!("LLM returned an error");
+            return false;
         }
     };
 
-    let q1 = DVector::from_vec(q1_vector);
-    let q2 = DVector::from_vec(q2_vector);
-    let c = DVector::from_vec(collection_vector);
+    let q1 = DVector::from_vec(current_q_vector);
+    let q2 = DVector::from_vec(previous_q_vector);
+    let score = q1.dot(&q2);
 
-    let similarity = q1.dot(&q2);
-    println!("Cosine similarity: {}", similarity);
-    Ok(similarity > 0.75)
+    log::debug!("Cosine similarity between current question and previous question: {score}");
+
+    score > 0.75
+}
+
+pub async fn last_2_chats(current_q: &str, chat_id: &str) -> String {
+    let mut accumulated_chat = String::new();
+    match chat_history(&chat_id.to_string(), 2) {
+        Some(v) => {
+            let question_list = v
+                .into_iter()
+                .filter_map(|m| {
+                    let mut tup: (String, String) = ("".to_string(), "".to_string());
+                    match m.role {
+                        ChatRole::User => {
+                            tup.0 = m.content;
+                        }
+                        ChatRole::Assistant => {
+                            tup.1 = m.content;
+                        }
+                    }
+
+                    if !tup.0.is_empty() || !tup.1.is_empty() {
+                        Some(tup)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<(String, String)>>();
+
+            for (q, a) in question_list {
+                if is_relevant(current_q, &q).await {
+                    let one_round_chat = format!("User asked: `{}` \n You answered: `{}` \n", q, a);
+                    accumulated_chat.push_str(&one_round_chat);
+                }
+            }
+        }
+        None => (),
+    }
+
+    accumulated_chat
 }
