@@ -118,8 +118,10 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
 
     let mut user_prompt = String::new();
     if !restart {
-        let accumulated_chat = last_2_chats(text, &chat_id).await;
+        let accumulated_chat = last_2_answers(text, &chat_id).await;
         log::info!("The question history is {:?}", accumulated_chat);
+        // let accumulated_chat = last_2_chats(text, &chat_id).await;
+        // log::info!("The question history is {:?}", accumulated_chat);
 
         match
             is_relevant(text, "This source material is a technical document on Kubernetes.").await
@@ -459,4 +461,31 @@ pub async fn last_2_chats(current_q: &str, chat_id: &str) -> String {
     }
 
     accumulated_chat
+}
+
+pub async fn last_2_answers(current_q: &str, chat_id: &str) -> String {
+    let mut accumulated_answers = String::new();
+    match chat_history(&chat_id.to_string(), 2) {
+        Some(v) => {
+            let answer_list = v
+                .into_iter()
+                .filter_map(|m| {
+                    match m.role {
+                        ChatRole::Assistant => Some(m.content),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<String>>();
+
+            for a in answer_list {
+                if is_relevant(current_q, &a).await {
+                    let one_round_anwser = format!("User asked a question, you answered: `{}` \n", a);
+                    accumulated_answers.push_str(&one_round_anwser);
+                }
+            }
+        }
+        None => (),
+    }
+
+    accumulated_answers
 }
