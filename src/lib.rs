@@ -143,7 +143,7 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
     }
 
     let co = ChatOptions {
-        // model: ChatModel::GPT4,
+        model: Some("mistralai/Mixtral-8x7B-Instruct-v0.1"),
         restart: restart,
         system_prompt: Some(cs.system_prompt.as_str()),
         post_prompt: Some(&cs.post_prompt),
@@ -199,7 +199,7 @@ pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String
         "You're preparing to answer questions about a specific source material, before ingesting the source material, you need to answer the question based on the knowledge you're trained on, here it is: `{question}`, please provide a concise answer in one paragraph, stay truthful and factual."
     );
     let co = ChatOptions {
-        // model: ChatModel::GPT4,
+        model: Some("mistralai/Mixtral-8x7B-Instruct-v0.1"),
         restart: true,
         system_prompt: Some(&sys_prompt_1),
         token_limit: 2048,
