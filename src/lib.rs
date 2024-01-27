@@ -458,7 +458,7 @@ pub async fn last_3_relevant_answers(hypo_answer: &str, chat_id: &str) -> String
     let mut accumulated_answers = String::new();
     let mut count = 0;
     if let Some(v) = chat_history(&chat_id.to_string(), 8) {
-        for m in v.into_iter().rev() {
+        for m in v.into_iter() {
             match m.role {
                 ChatRole::Assistant => {
                     if is_relevant(hypo_answer, &m.content).await {
