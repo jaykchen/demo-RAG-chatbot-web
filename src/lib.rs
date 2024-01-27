@@ -106,7 +106,10 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
 
     let mut openai = OpenAIFlows::new();
     openai.set_retry_times(3);
+
+    let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or("".to_string());
     let mut llm = LLMServiceFlows::new(&llm_endpoint);
+    llm.set_api_key(&llm_api_key);
 
     let restart = match get(&chat_id.to_string()) {
         Some(v) => v.as_bool().unwrap_or_default(),
