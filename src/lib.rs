@@ -206,24 +206,26 @@ fn reply(s: &str) {
 }
 
 pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String> {
-    let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
+    // let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
 
-    let llm = LLMServiceFlows::new(&llm_endpoint);
+    // let llm = LLMServiceFlows::new(&llm_endpoint);
+
+    let openai = OpenAIFlows::new();
     let sys_prompt_1 =
         format!("You're an assistant bot with expertise in all domains of human knowledge.");
 
     let usr_prompt_1 = format!(
         "You're preparing to answer questions about a specific source material, before ingesting the source material, you need to answer the question based on the knowledge you're trained on, here it is: `{question}`, please provide a concise answer in one paragraph, stay truthful and factual."
     );
-    let co = ChatOptions {
-        model: Some("mistralai/Mixtral-8x7B-Instruct-v0.1"),
+    let co = openai_flows::chat::ChatOptions {
+        model: openai_flows::chat::ChatModel::GPT4Turbo,
         restart: true,
         system_prompt: Some(&sys_prompt_1),
-        token_limit: 2048,
+        max_tokens: Some(128),
         ..Default::default()
     };
 
-    if let Ok(r) = llm
+    if let Ok(r) = openai
         .chat_completion("create-hypo-answer", &usr_prompt_1, &co)
         .await
     {
