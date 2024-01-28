@@ -10,7 +10,7 @@ The author learned about this technique from other projects. The technique is ba
 Please note that this code uses OpenAI to generate hypothetical answers, no intention to "cheat", but aims to isolate the side effect that such action may have on the main LLM currently engaged in the question/answer task. 
 
 
-## Use RAG on chat history to get most recent 3 answers revelant to the current question
+## Use RAG on chat history to find most revelant q/a rounds to the current one
 
 Create an ephemeral vector db, save the question answer pairs of the ongoing conversation to the db, get top 3 relevant pairs from this db, use them to enrich the context for current question.
 
