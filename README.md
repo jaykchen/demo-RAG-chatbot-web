@@ -10,18 +10,10 @@ The author learned about this technique from other projects. The technique is ba
 Please note that this code uses OpenAI to generate hypothetical answers, no intention to "cheat", but aims to isolate the side effect that such action may have on the main LLM currently engaged in the question/answer task. 
 
 
-## Mannully keep most recent 3 answers revelant to the current question
+## Use RAG on chat history to get most recent 3 answers revelant to the current question
 
-To answer questions wtih RAG, the bot uses long context from the source/carrying a heavy chat history, considering that the bot's historical answers have denser information about the user's intention and what has been found in the source. It's more cost-effective to use the answers as part of the context to enrich the bot's knowledge. Because the user may switch topic/diverge to unrelated topics, this code filters out historical answers that are not very relevant to the current question. Again, a hypothetical answer is used to make the filtering more precise.
+Create an ephemeral vector db, save the question answer pairs of the ongoing conversation to the db, get top 3 relevant pairs from this db, use them to enrich the context for current question.
 
-
-## Mannully calculate similarities between questions, answers, source material, etc.
-
-It's very efficient to get embeddings for short chunk of texts from an API, and it's also very efficient to 
-- do the filtering of historical answers by calculating the cosine distnaces of the embeddings of each answer and the current question
-- evaluate whether current question is about the source materials, so as to engage the RAG logic
-
-without making additional round trips to LLM.
 
 ## Below are almost the same with the main branch.
 
