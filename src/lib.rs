@@ -122,14 +122,12 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
 
     let mut user_prompt = String::new();
     if !restart {
-        let hypo_answer = create_hypothetical_answer(&text).await.unwrap_or(String::new());
-        let last_3_relevant_answers = last_3_relevant_answers(&hypo_answer, &chat_id).await;
-        log::info!("The answer history is {:?}", last_3_relevant_answers);
-
-        match
-            is_relevant(text, "This source material is a technical document on Kubernetes.").await
-        {
+        match is_relevant(text, "This source material is a technical book on Kubernetes.").await {
             true => {
+                let hypo_answer = create_hypothetical_answer(&text).await.unwrap_or(String::new());
+                let last_3_relevant_answers = last_3_relevant_answers(&hypo_answer, &chat_id).await;
+                log::info!("The answer history is {:?}", last_3_relevant_answers);
+
                 cs.update(last_3_relevant_answers.clone());
 
                 let rag_content = get_rag_content(text, &hypo_answer, &cs).await.unwrap_or(
@@ -140,6 +138,8 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
                 );
             }
             false => {
+                let last_3_relevant_answers = last_3_relevant_answers(&text, &chat_id).await;
+
                 cs.mutate(
                     String::from("You're a question and answer bot.") + &last_3_relevant_answers
                 );
@@ -200,17 +200,13 @@ pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String
     // let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
     // let llm = LLMServiceFlows::new(&llm_endpoint);
 
-    let nagative_reply_sample = String::from(
-        "I apologize, but I don't have access to the specific material. I'm just an AI and do not have the ability to browse or access external sources. I don't know. If you have any other questions or requests, please feel free to ask."
-    );
-
     let openai = OpenAIFlows::new();
     let sys_prompt_1 = format!(
         "You're an assistant bot with expertise in all domains of human knowledge."
     );
 
     let usr_prompt_1 = format!(
-        "You're preparing to answer questions about a specific source material, before ingesting the source material, you need to answer the question based on the knowledge you're trained on, here it is: `{question}`, please provide a concise answer in one paragraph, stay truthful and factual. In case that the question is totally out of context and you can't answer it, please reply with `I don't know`."
+        "You're preparing to answer questions about a specific source material, before ingesting the source material, you need to answer the question based on the knowledge you're trained on, here it is: `{question}`, please provide a concise answer in one paragraph, stay truthful and factual."
     );
     let co = openai_flows::chat::ChatOptions {
         model: openai_flows::chat::ChatModel::GPT4Turbo,
@@ -221,14 +217,7 @@ pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String
     };
 
     if let Ok(r) = openai.chat_completion("create-hypo-answer", &usr_prompt_1, &co).await {
-        match is_relevant(&r.choice, &nagative_reply_sample).await {
-            true => {
-                return Ok(question.to_string());
-            }
-            false => {
-                return Ok(r.choice);
-            }
-        }
+        return Ok(r.choice);
     }
     Err(anyhow::anyhow!("LLM generation went sideway"))
 }
