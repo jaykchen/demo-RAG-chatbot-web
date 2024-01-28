@@ -200,13 +200,17 @@ pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String
     // let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
     // let llm = LLMServiceFlows::new(&llm_endpoint);
 
+    let nagative_reply_sample = String::from(
+        "I apologize, but I don't have access to the specific material. I'm just an AI and do not have the ability to browse or access external sources. I don't know. If you have any other questions or requests, please feel free to ask."
+    );
+
     let openai = OpenAIFlows::new();
     let sys_prompt_1 = format!(
         "You're an assistant bot with expertise in all domains of human knowledge."
     );
 
     let usr_prompt_1 = format!(
-        "You're preparing to answer questions about a specific source material, before ingesting the source material, you need to answer the question based on the knowledge you're trained on, here it is: `{question}`, please provide a concise answer in one paragraph, stay truthful and factual."
+        "You're preparing to answer questions about a specific source material, before ingesting the source material, you need to answer the question based on the knowledge you're trained on, here it is: `{question}`, please provide a concise answer in one paragraph, stay truthful and factual. In case that the question is totally out of context and you can't answer it, please reply with `I don't know`."
     );
     let co = openai_flows::chat::ChatOptions {
         model: openai_flows::chat::ChatModel::GPT4Turbo,
@@ -217,7 +221,14 @@ pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String
     };
 
     if let Ok(r) = openai.chat_completion("create-hypo-answer", &usr_prompt_1, &co).await {
-        return Ok(r.choice);
+        match is_relevant(&r.choice, &nagative_reply_sample).await {
+            true => {
+                return Ok(question.to_string());
+            }
+            false => {
+                return Ok(r.choice);
+            }
+        }
     }
     Err(anyhow::anyhow!("LLM generation went sideway"))
 }
