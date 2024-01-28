@@ -1,13 +1,10 @@
 use anyhow;
 use flowsnet_platform_sdk::logger;
 use itertools::Itertools;
-use llmservice_flows::{
-    chat::{chat_history, ChatOptions, ChatRole},
-    LLMServiceFlows,
-};
-use openai_flows::{embeddings::EmbeddingsInput, OpenAIFlows};
+use llmservice_flows::{ chat::{ chat_history, ChatOptions, ChatRole }, LLMServiceFlows };
+use openai_flows::{ embeddings::EmbeddingsInput, OpenAIFlows };
 use regex::Regex;
-use serde_json::{from_str, json, Value};
+use serde_json::{ from_str, json, Value };
 use std::collections::HashMap;
 use store_flows::{
     get,
@@ -15,7 +12,7 @@ use store_flows::{
     // Expire, ExpireKind
 };
 use vector_store_flows::*;
-use webhook_flows::{create_endpoint, request_handler, send_response};
+use webhook_flows::{ create_endpoint, request_handler, send_response };
 
 #[derive(Debug, Clone)]
 pub struct ContentSettings {
@@ -34,7 +31,7 @@ impl ContentSettings {
         post_prompt: String,
         error_mesg: String,
         no_answer_mesg: String,
-        collection_name: String,
+        collection_name: String
     ) -> Self {
         Self {
             initial_system_prompt,
@@ -125,30 +122,27 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
 
     let mut user_prompt = String::new();
     if !restart {
-        let hypo_answer = create_hypothetical_answer(&text)
-            .await
-            .unwrap_or(String::new());
+        let hypo_answer = create_hypothetical_answer(&text).await.unwrap_or(String::new());
         let last_3_relevant_answers = last_3_relevant_answers(&hypo_answer, &chat_id).await;
         log::info!("The answer history is {:?}", last_3_relevant_answers);
 
-        match is_relevant(
-            text,
-            "This source material is a technical document on Kubernetes.",
-        )
-        .await
+        match
+            is_relevant(text, "This source material is a technical document on Kubernetes.").await
         {
             true => {
                 cs.update(last_3_relevant_answers.clone());
 
-                let rag_content = get_rag_content(text, &hypo_answer, &cs)
-                    .await
-                    .unwrap_or(String::new());
+                let rag_content = get_rag_content(text, &hypo_answer, &cs).await.unwrap_or(
+                    String::new()
+                );
                 user_prompt = format!(
                     "Given the context: `{rag_content}`, Here is the question you're to reply now: `{text}`. Please provide a concise answer, stay truthful and factual."
                 );
             }
             false => {
-                cs.mutate(String::from("You're a question and answer bot.") + &last_3_relevant_answers);
+                cs.mutate(
+                    String::from("You're a question and answer bot.") + &last_3_relevant_answers
+                );
 
                 user_prompt = format!(
                     "Here is the question you're to reply now: `{text}`. Please provide a concise answer."
@@ -166,10 +160,7 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
         ..Default::default()
     };
 
-    match llm
-        .chat_completion(&chat_id.to_string(), &user_prompt, &co)
-        .await
-    {
+    match llm.chat_completion(&chat_id.to_string(), &user_prompt, &co).await {
         Ok(r) => {
             reply(&r.choice);
         }
@@ -201,18 +192,18 @@ fn reply(s: &str) {
     send_response(
         200,
         vec![(String::from("content-type"), String::from("text/html"))],
-        s.as_bytes().to_vec(),
+        s.as_bytes().to_vec()
     );
 }
 
 pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String> {
     // let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
-
     // let llm = LLMServiceFlows::new(&llm_endpoint);
 
     let openai = OpenAIFlows::new();
-    let sys_prompt_1 =
-        format!("You're an assistant bot with expertise in all domains of human knowledge.");
+    let sys_prompt_1 = format!(
+        "You're an assistant bot with expertise in all domains of human knowledge."
+    );
 
     let usr_prompt_1 = format!(
         "You're preparing to answer questions about a specific source material, before ingesting the source material, you need to answer the question based on the knowledge you're trained on, here it is: `{question}`, please provide a concise answer in one paragraph, stay truthful and factual."
@@ -225,10 +216,7 @@ pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String
         ..Default::default()
     };
 
-    if let Ok(r) = openai
-        .chat_completion("create-hypo-answer", &usr_prompt_1, &co)
-        .await
-    {
+    if let Ok(r) = openai.chat_completion("create-hypo-answer", &usr_prompt_1, &co).await {
         return Ok(r.choice);
     }
     Err(anyhow::anyhow!("LLM generation went sideway"))
@@ -236,29 +224,27 @@ pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String
 
 pub async fn search_collection(
     question: &str,
-    collection_name: &str,
+    collection_name: &str
 ) -> anyhow::Result<Vec<(u64, String)>> {
     let mut openai = OpenAIFlows::new();
     openai.set_retry_times(3);
 
-    let question_vector = match openai
-        .create_embeddings(EmbeddingsInput::String(question.to_string()))
-        .await
+    let question_vector = match
+        openai.create_embeddings(EmbeddingsInput::String(question.to_string())).await
     {
         Ok(r) => {
             if r.len() < 1 {
                 log::error!("LLM returned no embedding for the question");
-                return Err(anyhow::anyhow!(
-                    "LLM returned no embedding for the question"
-                ));
+                return Err(anyhow::anyhow!("LLM returned no embedding for the question"));
             }
-            r[0].iter().map(|n| *n as f32).collect()
+            r[0]
+                .iter()
+                .map(|n| *n as f32)
+                .collect()
         }
         Err(_e) => {
             log::error!("LLM returned an error: {}", _e);
-            return Err(anyhow::anyhow!(
-                "LLM returned no embedding for the question"
-            ));
+            return Err(anyhow::anyhow!("LLM returned no embedding for the question"));
         }
     };
 
@@ -275,24 +261,11 @@ pub async fn search_collection(
                     "Received vector score={} and text={}",
                     p.score,
                     first_x_chars(
-                        p.payload
-                            .as_ref()
-                            .unwrap()
-                            .get("text")
-                            .unwrap()
-                            .as_str()
-                            .unwrap(),
+                        p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap(),
                         256
                     )
                 );
-                let p_text = p
-                    .payload
-                    .as_ref()
-                    .unwrap()
-                    .get("text")
-                    .unwrap()
-                    .as_str()
-                    .unwrap();
+                let p_text = p.payload.as_ref().unwrap().get("text").unwrap().as_str().unwrap();
                 let p_id = match p.id {
                     PointId::Num(i) => i,
                     _ => 0,
@@ -309,95 +282,10 @@ pub async fn search_collection(
     Ok(rag_content)
 }
 
-pub fn parse_questions_from_json(input: &str) -> Vec<String> {
-    let mut questions: Vec<String> = Vec::new();
-
-    let parsed_result: Result<Value, serde_json::Error> = from_str(input);
-
-    match parsed_result {
-        Ok(parsed) => {
-            for (key, value) in parsed.as_object().unwrap().iter() {
-                if key.starts_with("question_") {
-                    if let Some(question) = value.as_str() {
-                        questions.push(question.to_string());
-                    } else {
-                        log::error!("Value for '{}' key is not a string", key);
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            log::error!("Error parsing JSON: {:?}", e);
-            let re = Regex::new(r#""question_\d+":\s*"([^"]*)""#)
-                .expect("Failed to compile regex pattern");
-
-            for cap in re.captures_iter(input) {
-                if let Some(question) = cap.get(1) {
-                    questions.push(question.as_str().to_string());
-                }
-            }
-        }
-    }
-    questions
-}
-
-pub async fn chain_of_chat(
-    sys_prompt_1: &str,
-    usr_prompt_1: &str,
-    chat_id: &str,
-    gen_len_1: u32,
-    usr_prompt_2: &str,
-    gen_len_2: u32,
-    error_tag: &str,
-) -> anyhow::Result<String> {
-    let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
-
-    let co_1 = ChatOptions {
-        restart: true,
-        system_prompt: Some(&sys_prompt_1),
-        token_limit: gen_len_1,
-        ..Default::default()
-    };
-
-    let llm = LLMServiceFlows::new(&llm_endpoint);
-    match llm.chat_completion("step_1", &usr_prompt_1, &co_1).await {
-        Ok(res_1) => {
-            let sys_prompt_2 = serde_json::json!([{"role": "system", "content": sys_prompt_1},
-    {"role": "user", "content": usr_prompt_1},
-    {"role": "assistant", "content": &res_1.choice}])
-            .to_string();
-
-            let co_2 = ChatOptions {
-                restart: false,
-                system_prompt: Some(&sys_prompt_2),
-                token_limit: gen_len_2,
-                ..Default::default()
-            };
-            match llm.chat_completion("step_2", &usr_prompt_2, &co_2).await {
-                Ok(res_2) => {
-                    if res_2.choice.len() < 10 {
-                        log::error!(
-                            "{}, LLM generation went sideway: {:?}",
-                            error_tag,
-                            res_2.choice
-                        );
-                        return Err(anyhow::anyhow!("LLM generation went sideway"));
-                    }
-                    return Ok(res_2.choice);
-                }
-                Err(_e) => log::error!("{}, Step 2 LLM generation error {:?}", error_tag, _e),
-            };
-        }
-        Err(_e) => log::error!("{}, Step 1 LLM generation error {:?}", error_tag, _e),
-    }
-
-    Err(anyhow::anyhow!("LLM generation went sideway"))
-}
-
 pub async fn get_rag_content(
     text: &str,
     hypo_answer: &str,
-    cs: &ContentSettings,
+    cs: &ContentSettings
 ) -> anyhow::Result<String> {
     let raw_found_vec = search_collection(&text, &cs.collection_name).await?;
 
@@ -427,19 +315,26 @@ pub async fn is_relevant(current_q: &str, previous_q: &str) -> bool {
 
     let embedding_input = EmbeddingsInput::Vec(vec![current_q.to_string(), previous_q.to_string()]);
 
-    let (current_q_vector, previous_q_vector) =
-        match openai.create_embeddings(embedding_input).await {
-            Ok(r) if r.len() >= 2 => r
+    let (current_q_vector, previous_q_vector) = match
+        openai.create_embeddings(embedding_input).await
+    {
+        Ok(r) if r.len() >= 2 =>
+            r
                 .into_iter()
-                .map(|v| v.iter().map(|&n| n as f32).collect::<Vec<f32>>())
+                .map(|v|
+                    v
+                        .iter()
+                        .map(|&n| n as f32)
+                        .collect::<Vec<f32>>()
+                )
                 .take(2)
                 .collect_tuple()
                 .unwrap_or((Vec::<f32>::new(), Vec::<f32>::new())),
-            _ => {
-                log::error!("LLM returned an error");
-                return false;
-            }
-        };
+        _ => {
+            log::error!("LLM returned an error");
+            return false;
+        }
+    };
 
     let q1 = DVector::from_vec(current_q_vector);
     let q2 = DVector::from_vec(previous_q_vector);
@@ -452,8 +347,6 @@ pub async fn is_relevant(current_q: &str, previous_q: &str) -> bool {
     score > 0.75
 }
 
-
-
 pub async fn last_3_relevant_answers(hypo_answer: &str, chat_id: &str) -> String {
     let mut accumulated_answers = String::new();
     let mut count = 0;
@@ -462,8 +355,10 @@ pub async fn last_3_relevant_answers(hypo_answer: &str, chat_id: &str) -> String
             match m.role {
                 ChatRole::Assistant => {
                     if is_relevant(hypo_answer, &m.content).await {
-                        let one_round_anwser =
-                            format!("User asked a question, you answered: `{}` \n", m.content);
+                        let one_round_anwser = format!(
+                            "User asked a question, you answered: `{}` \n",
+                            m.content
+                        );
                         accumulated_answers.push_str(&one_round_anwser);
                         count += 1;
                     }
