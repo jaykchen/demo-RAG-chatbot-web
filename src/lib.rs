@@ -4,13 +4,9 @@ use itertools::Itertools;
 use llmservice_flows::{ chat::ChatOptions, LLMServiceFlows };
 use openai_flows::{ embeddings::EmbeddingsInput, OpenAIFlows };
 use regex::Regex;
-use serde_json::{ from_str, json, Value };
+use serde_json::{ json, Value };
 use std::collections::HashMap;
-use store_flows::{
-    get,
-    set,
-    // Expire, ExpireKind
-};
+use store_flows::{ get, set };
 use vector_store_flows::*;
 use webhook_flows::{ create_endpoint, request_handler, send_response };
 
@@ -41,10 +37,6 @@ impl ContentSettings {
             no_answer_mesg,
             collection_name,
         }
-    }
-
-    pub fn mutate(&mut self, new_prompt: String) {
-        self.system_prompt = new_prompt;
     }
 
     pub fn update(&mut self, new_content: String) {
@@ -122,8 +114,14 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
 
     let mut user_prompt = String::new();
 
+    if let Err(_) = collection_info("ephemeral").await {
+        let _ = create_ephemeral_collection().await;
+    }
+
+    cs.reset();
+    
     if restart {
-        let _ = create_emphemeral_collection(true).await;
+        let _ = reset_ephemeral_collection().await;
     } else {
         let mut rag_content = String::new();
 
@@ -363,40 +361,28 @@ pub async fn last_3_relevant_qa_pairs(question: &str, chat_id: &str) -> String {
         .join("\n")
 }
 
-pub async fn create_emphemeral_collection(reset: bool) {
+pub async fn create_ephemeral_collection() {
     let collection_name = "ephemeral";
     let vector_size: u64 = 1536;
-    let mut id: u64 = 0;
 
     let p = CollectionCreateParams { vector_size: vector_size };
     if let Err(e) = create_collection(collection_name, &p).await {
         log::error!("Cannot create collection named: {} with error: {}", collection_name, e);
         return;
     }
+}
 
-    if reset {
-        log::debug!("Reset the chat_history db");
-        // Delete collection, ignore any error
-        _ = delete_collection(collection_name).await;
-        // Create collection
-        let p = CollectionCreateParams { vector_size: vector_size };
-        if let Err(e) = create_collection(collection_name, &p).await {
-            log::error!("Cannot create collection named: {} with error: {}", collection_name, e);
-            return;
-        }
-    } else {
-        log::debug!("Continue with existing chat_history database");
-        match collection_info(collection_name).await {
-            Ok(ci) => {
-                id = ci.points_count;
-            }
-            Err(e) => {
-                log::error!("Cannot get collection stat {}", e);
-                return;
-            }
-        }
+pub async fn reset_ephemeral_collection() {
+    let collection_name = "ephemeral";
+    let vector_size: u64 = 1536;
+
+    _ = delete_collection(collection_name).await;
+
+    let p = CollectionCreateParams { vector_size: vector_size };
+    if let Err(e) = create_collection(collection_name, &p).await {
+        log::error!("Cannot create collection named: {} with error: {}", collection_name, e);
+        return;
     }
-    log::debug!("Starting ID is {}", id);
 }
 
 pub async fn upsert_text(text_to_upsert: &str) {
