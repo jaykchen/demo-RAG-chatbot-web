@@ -141,6 +141,7 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
             false => last_3_relevant_qa_pairs(&text, &chat_id).await,
         };
 
+        log::info!("last_3_relevant_qa_pairs: {}", last_3_relevant_qa_pairs.clone());
         cs.update(last_3_relevant_qa_pairs.clone());
 
         user_prompt = format!(
