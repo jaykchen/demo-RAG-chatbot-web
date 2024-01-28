@@ -1,7 +1,7 @@
 use anyhow;
 use flowsnet_platform_sdk::logger;
 use itertools::Itertools;
-use llmservice_flows::{ chat::{ chat_history, ChatOptions, ChatRole }, LLMServiceFlows };
+use llmservice_flows::{ chat::ChatOptions, LLMServiceFlows };
 use openai_flows::{ embeddings::EmbeddingsInput, OpenAIFlows };
 use regex::Regex;
 use serde_json::{ from_str, json, Value };
@@ -121,34 +121,31 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
     };
 
     let mut user_prompt = String::new();
-    if !restart {
-        match is_relevant(text, "This source material is a technical book on Kubernetes.").await {
+
+    if restart {
+        let _ = create_emphemeral_collection(true).await;
+    } else {
+        let mut rag_content = String::new();
+
+        let last_3_relevant_qa_pairs = match
+            is_relevant(text, "This source material is a technical book on Kubernetes.").await
+        {
             true => {
-                let hypo_answer = create_hypothetical_answer(&text).await.unwrap_or(String::new());
-                let last_3_relevant_answers = last_3_relevant_answers(&hypo_answer, &chat_id).await;
-                log::info!("The answer history is {:?}", last_3_relevant_answers);
-
-                cs.update(last_3_relevant_answers.clone());
-
-                let rag_content = get_rag_content(text, &hypo_answer, &cs).await.unwrap_or(
-                    String::new()
-                );
-                user_prompt = format!(
-                    "Given the context: `{rag_content}`, Here is the question you're to reply now: `{text}`. Please provide a concise answer, stay truthful and factual."
-                );
+                let hypo_answer = create_hypothetical_answer(&text).await;
+                rag_content = match get_rag_content(text, &hypo_answer, &cs).await {
+                    Ok(content) => format!("Given the context: `{content}`"),
+                    Err(_) => String::new(),
+                };
+                last_3_relevant_qa_pairs(&hypo_answer, &chat_id).await
             }
-            false => {
-                let last_3_relevant_answers = last_3_relevant_answers(&text, &chat_id).await;
+            false => last_3_relevant_qa_pairs(&text, &chat_id).await,
+        };
 
-                cs.mutate(
-                    String::from("You're a question and answer bot.") + &last_3_relevant_answers
-                );
+        cs.update(last_3_relevant_qa_pairs.clone());
 
-                user_prompt = format!(
-                    "Here is the question you're to reply now: `{text}`. Please provide a concise answer."
-                );
-            }
-        }
+        user_prompt = format!(
+            "{rag_content} Here is the question you're to reply now: `{text}`. Please provide a concise answer, stay truthful and factual."
+        );
     }
 
     let co = ChatOptions {
@@ -162,6 +159,10 @@ async fn handler(headers: Vec<(String, String)>, _qry: HashMap<String, Value>, b
 
     match llm.chat_completion(&chat_id.to_string(), &user_prompt, &co).await {
         Ok(r) => {
+            let qa_to_upsert = format!("{}\n {}", text, r.choice);
+            let qa_to_upsert = qa_to_upsert.chars().take(1500).collect::<String>();
+            let _ = upsert_text(qa_to_upsert.as_str()).await;
+
             reply(&r.choice);
         }
         Err(e) => {
@@ -196,7 +197,7 @@ fn reply(s: &str) {
     );
 }
 
-pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String> {
+pub async fn create_hypothetical_answer(question: &str) -> String {
     // let llm_endpoint = std::env::var("llm_endpoint").unwrap_or("".to_string());
     // let llm = LLMServiceFlows::new(&llm_endpoint);
 
@@ -217,9 +218,10 @@ pub async fn create_hypothetical_answer(question: &str) -> anyhow::Result<String
     };
 
     if let Ok(r) = openai.chat_completion("create-hypo-answer", &usr_prompt_1, &co).await {
-        return Ok(r.choice);
+        return r.choice;
     }
-    Err(anyhow::anyhow!("LLM generation went sideway"))
+
+    String::new()
 }
 
 pub async fn search_collection(
@@ -347,30 +349,87 @@ pub async fn is_relevant(current_q: &str, previous_q: &str) -> bool {
     score > 0.75
 }
 
-pub async fn last_3_relevant_answers(hypo_answer: &str, chat_id: &str) -> String {
-    let mut accumulated_answers = String::new();
-    let mut count = 0;
-    if let Some(v) = chat_history(&chat_id.to_string(), 8) {
-        for m in v.into_iter() {
-            match m.role {
-                ChatRole::Assistant => {
-                    if is_relevant(hypo_answer, &m.content).await {
-                        let one_round_anwser = format!(
-                            "User asked a question, you answered: `{}` \n",
-                            m.content
-                        );
-                        accumulated_answers.push_str(&one_round_anwser);
-                        count += 1;
-                    }
+pub async fn last_3_relevant_qa_pairs(question: &str, chat_id: &str) -> String {
+    let mut found_vec = search_collection(&question, "ephemeral").await.unwrap_or(Vec::new());
 
-                    if count > 2 {
-                        break;
-                    }
-                }
-                _ => (),
+    found_vec.sort_by(|a, b| a.0.cmp(&b.0));
+
+    found_vec
+        .into_iter()
+        .take(3)
+        .map(|(_, v)| v)
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
+pub async fn create_emphemeral_collection(reset: bool) {
+    let collection_name = "ephemeral";
+    let vector_size: u64 = 1536;
+    let mut id: u64 = 0;
+
+    let p = CollectionCreateParams { vector_size: vector_size };
+    if let Err(e) = create_collection(collection_name, &p).await {
+        log::error!("Cannot create collection named: {} with error: {}", collection_name, e);
+        return;
+    }
+
+    if reset {
+        log::debug!("Reset the chat_history db");
+        // Delete collection, ignore any error
+        _ = delete_collection(collection_name).await;
+        // Create collection
+        let p = CollectionCreateParams { vector_size: vector_size };
+        if let Err(e) = create_collection(collection_name, &p).await {
+            log::error!("Cannot create collection named: {} with error: {}", collection_name, e);
+            return;
+        }
+    } else {
+        log::debug!("Continue with existing chat_history database");
+        match collection_info(collection_name).await {
+            Ok(ci) => {
+                id = ci.points_count;
+            }
+            Err(e) => {
+                log::error!("Cannot get collection stat {}", e);
+                return;
             }
         }
     }
+    log::debug!("Starting ID is {}", id);
+}
 
-    accumulated_answers
+pub async fn upsert_text(text_to_upsert: &str) {
+    let mut points = Vec::<Point>::new();
+    let openai = OpenAIFlows::new();
+    let collection_name = "ephemeral";
+    let id = match collection_info(collection_name).await {
+        Ok(ci) => { ci.points_count + 1 }
+        Err(e) => {
+            log::error!("Cannot get collection stat {}", e);
+            return;
+        }
+    };
+
+    let input = EmbeddingsInput::String(text_to_upsert.to_string());
+    match openai.create_embeddings(input).await {
+        Ok(r) => {
+            let p = Point {
+                id: PointId::Num(id),
+                vector: r[0]
+                    .iter()
+                    .map(|n| *n as f32)
+                    .collect(),
+                payload: json!({"text": text_to_upsert}).as_object().map(|m| m.to_owned()),
+            };
+            points.push(p);
+        }
+        Err(e) => {
+            log::error!("OpenAI returned an error: {}", e);
+        }
+    }
+
+    if let Err(e) = upsert_points(collection_name, points).await {
+        log::error!("Cannot upsert into database! {}", e);
+        return;
+    }
 }
